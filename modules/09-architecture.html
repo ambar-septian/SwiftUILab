@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>09. Architecture Patterns — SwiftUILab</title>
+  <link rel="stylesheet" href="../assets/css/styles.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+</head>
+<body data-base="../" data-module="architecture">
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="brand" href="../index.html">SwiftUILab</a>
+      <nav id="sidebar-nav"></nav>
+    </aside>
+
+    <main class="content">
+      <p class="eyebrow">Module 09</p>
+      <h1>Architecture Patterns</h1>
+      <p class="lead">Choosing structure deliberately: where MVVM fits and where it's overhead, what TCA buys you, unidirectional data flow with a tiny reducer-backed store, dependency injection without a framework, and SPM feature modules for boundaries at scale.</p>
+
+      <!-- ============================== CONCEPT ============================== -->
+      <h2>Concept</h2>
+
+      <h3>MVVM: fit vs overhead</h3>
+      <p>In SwiftUI, the View is already a value-type function of state, and <code>@Observable</code> gives you observable models for free. MVVM fits when a screen has real presentation logic and service calls worth isolating from the view: put that in an <code>@Observable</code> view model. It becomes <em>overhead</em> when the "view model" is a passthrough holding one <code>@State</code> — you've added a class and wiring for nothing. Reach for plain <code>@State</code>/<code>@Observable</code> first; promote to a view model when logic accumulates.</p>
+      <pre><code class="language-swift">@Observable @MainActor final class SearchViewModel {
+    var query = ""
+    private(set) var results: [String] = []
+    private let corpus: [String]
+    func search() { results = corpus.filter { $0.localizedCaseInsensitiveContains(query) } }
+}</code></pre>
+
+      <h3>Unidirectional data flow</h3>
+      <p>State flows down, events (actions) flow up, and a single <strong>reducer</strong> is the only place state changes. Views <em>send</em> actions; they never mutate state directly. This makes every change traceable and the reducer trivially testable as a pure function. A minimal store:</p>
+      <pre><code class="language-swift">@Observable final class Store&lt;State, Action&gt; {
+    private(set) var state: State
+    private let reduce: (inout State, Action) -&gt; Void
+    init(initial: State, reduce: @escaping (inout State, Action) -&gt; Void) {
+        self.state = initial; self.reduce = reduce
+    }
+    func send(_ action: Action) { reduce(&amp;state, action) }   // the only mutation path
+}
+
+enum CounterFeature {
+    struct State: Equatable { var count = 0; var history: [Int] = [] }
+    enum Action { case increment, decrement, reset }
+    static func reduce(_ s: inout State, _ a: Action) {
+        switch a {
+        case .increment: s.count += 1; s.history.append(s.count)
+        case .decrement: s.count -= 1; s.history.append(s.count)
+        case .reset:     s = State()
+        }
+    }
+}</code></pre>
+
+      <h3>TCA overview</h3>
+      <p>The Composable Architecture formalizes this pattern: <code>State</code>, <code>Action</code>, a <code>Reducer</code>, and an <code>Effect</code> type for side effects, with first-class composition (combining feature reducers), dependency injection, and exhaustive testing of state transitions <em>and</em> effects. The reference store above is the same idea, stripped to its essence. TCA earns its weight on large apps with many shared, interacting features; it's heavy for a handful of screens.</p>
+
+      <h3>DI without a framework</h3>
+      <p>You don't need a DI container. Two idiomatic patterns: a <strong>composition root</strong> — an object (here <code>AppContainer</code>) constructed once at launch holding your services, injected via <code>.environment(...)</code> and read with <code>@Environment</code>; and <strong>protocol-fronted dependencies</strong> with <code>Live</code>/<code>Mock</code> implementations chosen at the edge. Together they give testability and swappability with zero magic.</p>
+
+      <h3>SPM feature modules</h3>
+      <p>At scale, split features into Swift Package targets with explicit dependencies. The package boundary <em>enforces</em> separation — a feature can't reach into another's internals because it isn't imported. Benefits: faster incremental builds, independent previews, and a forcing function for clean interfaces. Cost: more <code>Package.swift</code> wiring, so modularize along real seams, not speculatively.</p>
+
+      <!-- ============================== PITFALLS ============================== -->
+      <h2>Common pitfalls &amp; gotchas</h2>
+      <div class="callout pitfall">
+        <ul>
+          <li><strong>View models that do nothing.</strong> A class wrapping a single <code>@State</code> adds indirection without isolating logic. Use plain state until there's logic to extract.</li>
+          <li><strong>Mutating state outside the reducer.</strong> In a unidirectional store, a view that pokes <code>state</code> directly breaks traceability and testability. Everything goes through <code>send</code>.</li>
+          <li><strong>Adopting TCA for a small app.</strong> The boilerplate and learning curve outweigh the benefit until you have many interacting features. Start with the minimal store.</li>
+          <li><strong>Side effects inside the reducer.</strong> Keep reducers pure (no I/O, no <code>Date()</code>, no networking) so they're deterministic to test; model effects separately and feed results back as actions.</li>
+          <li><strong>Singletons as hidden dependencies.</strong> <code>SomeService.shared</code> sprinkled through views can't be swapped in tests. Inject through the composition root instead.</li>
+          <li><strong>Premature modularization.</strong> Splitting into packages before the seams are clear creates churn. Extract a module when a boundary has proven stable.</li>
+        </ul>
+      </div>
+
+      <!-- ============================== REFERENCE ============================== -->
+      <h2>Reference implementation</h2>
+      <p>In the project: <code>Modules/09-Architecture/Reference/</code>. A counter built on the unidirectional <code>Store</code> sits next to an MVVM search for contrast:</p>
+      <pre><code class="language-swift">@State private var counter = CounterFeature.store()
+
+Text("count = \(counter.state.count)")
+Button("+") { counter.send(.increment) }       // send actions — never mutate state
+Button("Reset") { counter.send(.reset) }
+
+// vs MVVM
+@State private var search = SearchViewModel()
+TextField("Search", text: $search.query).onSubmit { search.search() }</code></pre>
+
+      <!-- ============================== CHALLENGE ============================== -->
+      <h2>Challenge</h2>
+      <p>Open <code>Modules/09-Architecture/Challenge/ArchitectureChallengeScreen.swift</code>. Model a todo-toggle feature with the unidirectional <code>Store</code>:</p>
+      <ol>
+        <li><strong>State</strong> — <code>{ var todos: [String]; var done: Set&lt;Int&gt; }</code>.</li>
+        <li><strong>Action</strong> — <code>add(String)</code>, <code>toggle(Int)</code>, <code>clearDone</code>.</li>
+        <li><strong>Reducer</strong> — pure <code>reduce(_:_:)</code> implementing each action; expose <code>store()</code>.</li>
+        <li><strong>View</strong> — send actions from the UI; render <code>store.state.todos</code> with a per-row toggle. Test the reducer directly.</li>
+      </ol>
+
+      <!-- ============================== SOLUTION ============================== -->
+      <h2>Solution reveal</h2>
+      <details class="reveal">
+        <summary>Show the solution &amp; commentary</summary>
+        <pre><code class="language-swift">enum TodoFeature {
+    struct State: Equatable { var todos: [String] = []; var done: Set&lt;Int&gt; = [] }
+    enum Action { case add(String), toggle(Int), clearDone }
+
+    static func reduce(_ s: inout State, _ a: Action) {
+        switch a {
+        case .add(let title):
+            let t = title.trimmingCharacters(in: .whitespaces)
+            guard !t.isEmpty else { return }
+            s.todos.append(t)
+        case .toggle(let i):
+            if s.done.contains(i) { s.done.remove(i) } else { s.done.insert(i) }
+        case .clearDone:
+            // remove done items high-index first so earlier indices stay valid
+            for i in s.done.sorted(by: &gt;) where i &lt; s.todos.count { s.todos.remove(at: i) }
+            s.done.removeAll()
+        }
+    }
+
+    static func store() -&gt; Store&lt;State, Action&gt; { Store(initial: State(), reduce: reduce) }
+}
+
+// Reducer test — no store, no UI
+@Test func togglesAndClears() {
+    var s = TodoFeature.State(todos: ["A", "B"], done: [])
+    TodoFeature.reduce(&amp;s, .toggle(0))
+    #expect(s.done == [0])
+    TodoFeature.reduce(&amp;s, .clearDone)
+    #expect(s.todos == ["B"])
+    #expect(s.done.isEmpty)
+}</code></pre>
+        <p><strong>Key decisions:</strong></p>
+        <ul>
+          <li>The reducer is pure and static — the test calls it with a value and asserts on the result, no async or wiring.</li>
+          <li><code>clearDone</code> removes by descending index so earlier removals don't shift the indices still to be removed — a classic mutation bug the test guards against.</li>
+          <li>Validation (rejecting empty titles) lives in the reducer, the single source of truth for state changes, not scattered in the view.</li>
+        </ul>
+      </details>
+
+      <!-- ============================== FURTHER READING ============================== -->
+      <h2>Further reading</h2>
+      <ul>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2023/10149/">WWDC23 — Discover Observation in SwiftUI</a></li>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2020/10040/">WWDC20 — Data Essentials in SwiftUI</a></li>
+        <li><a href="https://github.com/pointfreeco/swift-composable-architecture">The Composable Architecture (TCA)</a></li>
+        <li><a href="https://www.swift.org/documentation/package-manager/">Swift Package Manager</a></li>
+        <li><a href="https://developer.apple.com/documentation/swiftui/managing-model-data-in-your-app">Apple Docs — Managing model data</a></li>
+      </ul>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script src="../assets/js/app.js"></script>
+</body>
+</html>

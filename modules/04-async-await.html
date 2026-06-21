@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>04. Async / Await — SwiftUILab</title>
+  <link rel="stylesheet" href="../assets/css/styles.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+</head>
+<body data-base="../" data-module="async-await">
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="brand" href="../index.html">SwiftUILab</a>
+      <nav id="sidebar-nav"></nav>
+    </aside>
+
+    <main class="content">
+      <p class="eyebrow">Module 04</p>
+      <h1>Async / Await</h1>
+      <p class="lead">Suspension points, the Task lifecycle, cooperative cancellation, async sequences, and bridging callback APIs with continuations — plus the all-important <code>.task</code> vs <code>Task { }</code> distinction in views.</p>
+
+      <!-- ============================== CONCEPT ============================== -->
+      <h2>Concept</h2>
+
+      <h3>Suspension points</h3>
+      <p>An <code>await</code> marks a <em>suspension point</em>: the function may pause there, releasing the thread back to the cooperative thread pool, and resume later — possibly on a different thread. Nothing blocks. This is the mental shift from GCD: you don't hop queues to avoid blocking, you <code>await</code> and the runtime reuses the thread for other work. Between two <code>await</code>s your code runs synchronously and atomically with respect to its actor.</p>
+      <pre><code class="language-swift">func fetch() async throws -&gt; [Article] {
+    try await Task.sleep(for: .milliseconds(600))   // suspension point — thread is freed
+    return articles
+}</code></pre>
+
+      <h3>Task lifecycle &amp; priorities</h3>
+      <p>A <code>Task</code> is a unit of asynchronous work. An <em>unstructured</em> task (<code>Task { }</code>) starts immediately, inherits the actor and priority of its origin, and runs independently — you must hold and cancel it yourself. A task has a <code>priority</code> (<code>.high</code>, <code>.userInitiated</code>, <code>.utility</code>, <code>.background</code>) that the scheduler uses; it's a hint, not a guarantee.</p>
+
+      <h3>.task vs Task { } in views</h3>
+      <p>This is the most common source of leaked work in SwiftUI:</p>
+      <table class="kv">
+        <tr><th></th><th>.task { }</th><th>Task { }</th></tr>
+        <tr><td>Tied to view lifetime</td><td>Yes — auto-cancelled on disappear</td><td>No — outlives the view</td></tr>
+        <tr><td>Restart on identity change</td><td><code>.task(id:)</code> re-runs</td><td>Manual</td></tr>
+        <tr><td>Who cancels it</td><td>The framework</td><td>You</td></tr>
+        <tr><td>Use for</td><td>Loading tied to a view</td><td>Fire-and-forget from a button tap</td></tr>
+      </table>
+      <p>Use <code>.task</code> for "load while this screen is on-screen." Use <code>Task { }</code> inside a button action for a one-shot you don't need to cancel — but be aware it is not bound to the view.</p>
+
+      <h3>Cooperative cancellation</h3>
+      <p>Cancelling a task does <strong>not</strong> stop it — it only sets a flag. Long-running work must check <code>Task.isCancelled</code> (or call <code>try Task.checkCancellation()</code>, which throws <code>CancellationError</code>) and stop voluntarily. Most async stdlib calls (<code>Task.sleep</code>, <code>URLSession</code>) check for you and throw on cancellation.</p>
+      <pre><code class="language-swift">for step in 1...100 {
+    if Task.isCancelled { return }            // poll the flag
+    try? await Task.sleep(for: .milliseconds(40))
+    progress = step
+}</code></pre>
+
+      <h3>AsyncSequence / AsyncStream</h3>
+      <p><code>AsyncSequence</code> is the async analogue of <code>Sequence</code>: you iterate it with <code>for await</code>. <code>AsyncStream</code> is the easiest way to build one — bridge any push-based source (a delegate, a timer, a Combine publisher) by calling <code>continuation.yield(_:)</code>, then <code>continuation.finish()</code>. Set <code>onTermination</code> to clean up when the consumer stops or is cancelled.</p>
+      <pre><code class="language-swift">AsyncStream&lt;Int&gt; { continuation in
+    let task = Task { for n in stride(from: 5, through: 0, by: -1) { continuation.yield(n) } ; continuation.finish() }
+    continuation.onTermination = { _ in task.cancel() }   // propagate cancellation upstream
+}</code></pre>
+
+      <h3>withCheckedContinuation bridging</h3>
+      <p>To adapt a callback API into <code>async</code>, wrap it in <code>withCheckedContinuation</code> (or the throwing variant) and <code>resume</code> the continuation exactly once. The <em>checked</em> form adds runtime assertions that catch the two classic bugs: resuming twice (crash) or never (a task that hangs forever).</p>
+      <pre><code class="language-swift">func geocode(_ q: String) async throws -&gt; Int {
+    try await withCheckedThrowingContinuation { continuation in
+        LegacyGeocoder.lookup(q) { result in continuation.resume(with: result) }
+    }
+}</code></pre>
+
+      <!-- ============================== PITFALLS ============================== -->
+      <h2>Common pitfalls &amp; gotchas</h2>
+      <div class="callout pitfall">
+        <ul>
+          <li><strong>Task { } in a view body or onAppear leaks.</strong> It isn't tied to the view; if the view disappears the work keeps running and may update detached state. Prefer <code>.task</code>.</li>
+          <li><strong>Forgetting cancellation is cooperative.</strong> A tight compute loop with no <code>Task.isCancelled</code> check will run to completion even after <code>.cancel()</code>. Add checkpoints.</li>
+          <li><strong>Resuming a continuation zero or two times.</strong> Zero → the awaiting task hangs forever; two → crash. Every path through the callback must resume exactly once. Use the checked variant during development.</li>
+          <li><strong>Swallowing CancellationError as a real error.</strong> When a <code>.task</code> is cancelled, the in-flight call throws <code>CancellationError</code>. Catch it separately and leave state untouched, rather than showing a spurious "failed" UI.</li>
+          <li><strong>Updating UI off the main actor.</strong> Work after an <code>await</code> may resume off the main thread. In a SwiftUI view (main-actor isolated) you're fine; in a plain helper, hop back with <code>@MainActor</code> or <code>await MainActor.run</code>.</li>
+          <li><strong>AsyncStream without onTermination.</strong> If you don't cancel the producing task when the consumer stops, it runs forever — a subtle leak.</li>
+        </ul>
+      </div>
+
+      <!-- ============================== REFERENCE ============================== -->
+      <h2>Reference implementation</h2>
+      <p>In the project: <code>Modules/04-AsyncAwait/Reference/</code>. Key pieces:</p>
+      <pre><code class="language-swift">// Typed load phase drives the view, loaded via .task(id:)
+enum LoadPhase&lt;Value: Equatable&gt;: Equatable { case idle, loading, loaded(Value), failed(String) }
+
+.task(id: useFailing) {
+    phase = .loading
+    do { phase = .loaded(try await service.fetch()) }
+    catch is CancellationError { /* view went away — ignore */ }
+    catch { phase = .failed(error.localizedDescription) }
+}
+
+// Cooperative cancellation: stored Task + isCancelled checks
+work = Task {
+    for step in 1...100 {
+        if Task.isCancelled { status = "Cancelled"; return }
+        try? await Task.sleep(for: .milliseconds(40)); progress = step
+    }
+}
+// Cancel button: work?.cancel()
+
+// Consuming an AsyncStream in a view
+.task(id: restartToken) { for await n in Countdown.stream(from: 5) { current = n } }
+
+// Bridging a callback API
+func geocode(_ q: String) async throws -&gt; Int {
+    try await withCheckedThrowingContinuation { c in
+        LegacyGeocoder.lookup(q) { c.resume(with: $0) }
+    }
+}</code></pre>
+
+      <!-- ============================== CHALLENGE ============================== -->
+      <h2>Challenge</h2>
+      <p>Open <code>Modules/04-AsyncAwait/Challenge/AsyncChallengeScreen.swift</code>:</p>
+      <ol>
+        <li><strong>.task loading</strong> — drive a view from <code>LoadPhase&lt;[Article]&gt;</code>; render spinner / rows / error.</li>
+        <li><strong>Cancellation</strong> — a counting <code>Task</code> with a Cancel button; the loop must check <code>Task.isCancelled</code>.</li>
+        <li><strong>AsyncStream</strong> — drive a label from <code>Countdown.stream(from:)</code> with <code>for await</code> inside <code>.task</code>.</li>
+        <li><strong>Continuation</strong> — call <code>geocode(_:)</code>, then write your <em>own</em> bridge over <code>LegacyGeocoder.lookup</code>.</li>
+      </ol>
+
+      <!-- ============================== SOLUTION ============================== -->
+      <h2>Solution reveal</h2>
+      <details class="reveal">
+        <summary>Show the solution &amp; commentary</summary>
+        <pre><code class="language-swift">// 1. Loading
+@State private var phase: LoadPhase&lt;[Article]&gt; = .idle
+var body: some View {
+    Group {
+        switch phase {
+        case .idle, .loading: ProgressView()
+        case .loaded(let a):  ForEach(a) { Text($0.title) }
+        case .failed(let m):  Text(m).foregroundStyle(.red)
+        }
+    }
+    .task {
+        phase = .loading
+        do { phase = .loaded(try await LiveArticleService().fetch()) }
+        catch is CancellationError {}
+        catch { phase = .failed(error.localizedDescription) }
+    }
+}
+
+// 2. Cancellation
+@State private var work: Task&lt;Void, Never&gt;?
+func start() {
+    work = Task {
+        for i in 1...100 {
+            if Task.isCancelled { return }
+            try? await Task.sleep(for: .milliseconds(40)); progress = i
+        }
+        work = nil
+    }
+}
+// Cancel: work?.cancel()
+
+// 3. Stream
+@State private var current: Int?
+.task { for await n in Countdown.stream(from: 5) { current = n } }
+
+// 4. Your own bridge
+func myGeocode(_ q: String) async throws -&gt; Int {
+    try await withCheckedThrowingContinuation { c in
+        LegacyGeocoder.lookup(q) { c.resume(with: $0) }   // resume exactly once
+    }
+}</code></pre>
+        <p><strong>Key decisions:</strong></p>
+        <ul>
+          <li>Catch <code>CancellationError</code> <em>before</em> the generic <code>catch</code> so a normal disappearance doesn't render as an error.</li>
+          <li>Storing the <code>Task</code> in <code>@State</code> is what lets a separate button cancel it; clearing it to <code>nil</code> on completion gates the Start/Cancel buttons.</li>
+          <li>The stream's <code>onTermination</code> (in <code>Countdown</code>) cancels the producer when <code>.task</code> tears down — no leak.</li>
+          <li>Using <code>resume(with:)</code> forwards the <code>Result</code> directly, so success and failure both route through one call — easy to keep "exactly once."</li>
+        </ul>
+      </details>
+
+      <!-- ============================== FURTHER READING ============================== -->
+      <h2>Further reading</h2>
+      <ul>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2021/10132/">WWDC21 — Meet async/await in Swift</a></li>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2021/10134/">WWDC21 — Explore structured concurrency in Swift</a></li>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2022/110355/">WWDC22 — Visualize and optimize Swift concurrency</a></li>
+        <li><a href="https://developer.apple.com/documentation/swift/asyncstream">Apple Docs — AsyncStream</a></li>
+        <li><a href="https://developer.apple.com/documentation/swift/withcheckedthrowingcontinuation(function:_:)">Apple Docs — withCheckedThrowingContinuation</a></li>
+        <li><a href="https://developer.apple.com/documentation/swiftui/view/task(priority:_:)">Apple Docs — View.task</a></li>
+      </ul>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script src="../assets/js/app.js"></script>
+</body>
+</html>

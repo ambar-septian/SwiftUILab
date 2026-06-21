@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>07. SwiftData &amp; Persistence — SwiftUILab</title>
+  <link rel="stylesheet" href="../assets/css/styles.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+</head>
+<body data-base="../" data-module="swiftdata">
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="brand" href="../index.html">SwiftUILab</a>
+      <nav id="sidebar-nav"></nav>
+    </aside>
+
+    <main class="content">
+      <p class="eyebrow">Module 07</p>
+      <h1>SwiftData &amp; Persistence</h1>
+      <p class="lead">Modeling with <code>@Model</code> and relationships, fetching with <code>@Query</code>, injecting the <code>ModelContext</code> / <code>ModelContainer</code>, schema migrations, and keeping batch operations and predicates cheap.</p>
+
+      <!-- ============================== CONCEPT ============================== -->
+      <h2>Concept</h2>
+
+      <h3>@Model &amp; relationships</h3>
+      <p><code>@Model</code> is a macro that turns a plain class into a persisted, observable entity — it synthesizes the storage, conformances, and change tracking. Relationships are ordinary properties; annotate them with <code>@Relationship</code> to set the delete rule and the inverse key path, so SwiftData keeps both sides in sync and cascades deletes correctly.</p>
+      <pre><code class="language-swift">@Model final class TodoProject {
+    var name: String
+    @Relationship(deleteRule: .cascade, inverse: \TodoItem.project)
+    var items: [TodoItem]
+    init(name: String, items: [TodoItem] = []) { self.name = name; self.items = items }
+}
+
+@Model final class TodoItem {
+    var title: String
+    var isDone: Bool
+    var project: TodoProject?
+    init(title: String, isDone: Bool = false) { self.title = title; self.isDone = isDone }
+}</code></pre>
+      <div class="callout">
+        <strong>Name collision watch:</strong> don't call a model <code>Task</code> — it collides with Swift Concurrency's <code>Task</code>. This project uses <code>TodoItem</code>.
+      </div>
+
+      <h3>@Query fetching</h3>
+      <p><code>@Query</code> is a view-driven fetch: it reads from the <code>ModelContext</code> in the environment, renders the results, and <em>automatically re-runs and re-renders</em> when the underlying store changes. Sorting and filtering passed to <code>@Query</code> are pushed into the fetch (the store does the work), not applied in Swift after loading everything.</p>
+      <pre><code class="language-swift">@Query(sort: \TodoItem.title) private var items: [TodoItem]</code></pre>
+
+      <h3>ModelContext / ModelContainer DI</h3>
+      <p>The <strong>container</strong> owns the schema and the on-disk store; the <strong>context</strong> is the scratchpad you read and write through (inserts, deletes, saves). You install a container at some level of the view tree with <code>.modelContainer(...)</code>, and descendants read the context via <code>@Environment(\.modelContext)</code>. For previews and tests, build an <em>in-memory</em> container so each run is clean and disk-free.</p>
+      <pre><code class="language-swift">// Self-contained subtree with its own in-memory store
+TodoDemoView()
+    .modelContainer(for: [TodoProject.self, TodoItem.self], inMemory: true)
+
+// Writing through the context
+@Environment(\.modelContext) private var context
+context.insert(TodoItem(title: "Buy milk"))
+context.delete(item)
+// mutating a fetched @Model autosaves on the next runloop tick</code></pre>
+
+      <h3>Migrations &amp; schema versions</h3>
+      <p>Lightweight changes (adding an optional property, a new model) migrate automatically. Anything that changes meaning — renames, type changes, splitting an entity — needs an explicit <code>VersionedSchema</code> per version plus a <code>SchemaMigrationPlan</code> describing <em>lightweight</em> or <em>custom</em> stages between them. Version your schema from the first release so you have a migration anchor.</p>
+
+      <h3>Batch ops &amp; predicate cost</h3>
+      <p>A <code>#Predicate</code> compiles to a store query (SQL under the hood), so the filter runs in the database rather than in Swift — keep filtering in the <code>FetchDescriptor</code>, not in a post-fetch <code>.filter { }</code> that loads everything first. For large deletes, <code>context.delete(model:where:)</code> performs a batch delete without materializing every object.</p>
+      <pre><code class="language-swift">FetchDescriptor&lt;TodoItem&gt;(
+    predicate: #Predicate { $0.isDone == false },   // runs in the store
+    sortBy: [SortDescriptor(\.title)]
+)</code></pre>
+
+      <!-- ============================== PITFALLS ============================== -->
+      <h2>Common pitfalls &amp; gotchas</h2>
+      <div class="callout pitfall">
+        <ul>
+          <li><strong>Naming a model <code>Task</code>.</strong> Collides with concurrency's <code>Task</code> and produces baffling errors. Pick a distinct name.</li>
+          <li><strong>Filtering after the fetch.</strong> <code>@Query</code> all rows then <code>.filter { }</code> in Swift loads the whole table. Push the predicate into the query so the store filters.</li>
+          <li><strong>Missing inverse relationship.</strong> Without <code>inverse:</code>, the two sides can drift and cascade deletes may not fire. Always declare the inverse.</li>
+          <li><strong>Forgetting <code>import SwiftData</code>.</strong> <code>.modelContainer</code> and <code>@Query</code> are unavailable without it — even in a <code>#Preview</code>.</li>
+          <li><strong>Sharing one context across threads.</strong> A <code>ModelContext</code> is not thread-safe. Use the main context for UI; create a separate context (or a <code>ModelActor</code>) for background work.</li>
+          <li><strong>Assuming every schema change is automatic.</strong> Renames and type changes need an explicit migration plan or the store fails to open. Version early.</li>
+        </ul>
+      </div>
+
+      <!-- ============================== REFERENCE ============================== -->
+      <h2>Reference implementation</h2>
+      <p>In the project: <code>Modules/07-SwiftData/Reference/</code>. Key pieces:</p>
+      <pre><code class="language-swift">// Centralized container/context factories — app, previews, and tests build the schema once
+enum TodoStore {
+    static func inMemoryContainer() throws -&gt; ModelContainer {
+        try ModelContainer(for: TodoProject.self, TodoItem.self,
+                           configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+    }
+    static func openItemsDescriptor() -&gt; FetchDescriptor&lt;TodoItem&gt; {
+        FetchDescriptor(predicate: #Predicate { $0.isDone == false },
+                        sortBy: [SortDescriptor(\.title)])
+    }
+}
+
+// Screen attaches its own in-memory container; inner view reads with @Query, writes via context
+struct SwiftDataReferenceScreen: View {
+    var body: some View {
+        TodoDemoView().modelContainer(for: [TodoProject.self, TodoItem.self], inMemory: true)
+    }
+}</code></pre>
+
+      <!-- ============================== CHALLENGE ============================== -->
+      <h2>Challenge</h2>
+      <p>Open <code>Modules/07-SwiftData/Challenge/SwiftDataChallengeScreen.swift</code>. Build a <strong>Notebook</strong>:</p>
+      <ol>
+        <li><strong>Model</strong> — a <code>Note</code> <code>@Model</code> with <code>body</code>, <code>pinned</code>, <code>createdAt</code>.</li>
+        <li><strong>Query list</strong> — read with <code>@Query</code> (newest first), insert via the context, swipe-to-delete.</li>
+        <li><strong>#Predicate filter</strong> — a "pinned only" toggle, ideally via a <code>FetchDescriptor</code> whose predicate filters <code>pinned == true</code>.</li>
+      </ol>
+
+      <!-- ============================== SOLUTION ============================== -->
+      <h2>Solution reveal</h2>
+      <details class="reveal">
+        <summary>Show the solution &amp; commentary</summary>
+        <pre><code class="language-swift">@Model final class Note {
+    var body: String
+    var pinned: Bool
+    var createdAt: Date
+    init(body: String, pinned: Bool = false, createdAt: Date = .now) {
+        self.body = body; self.pinned = pinned; self.createdAt = createdAt
+    }
+}
+
+struct SwiftDataChallengeScreen: View {
+    var body: some View {
+        NotebookView().modelContainer(for: [Note.self], inMemory: true)
+    }
+}
+
+private struct NotebookView: View {
+    @Environment(\.modelContext) private var context
+    @Query(sort: \Note.createdAt, order: .reverse) private var notes: [Note]
+    @State private var draft = ""
+    @State private var pinnedOnly = false
+
+    private var visible: [Note] { pinnedOnly ? notes.filter(\.pinned) : notes }
+
+    var body: some View {
+        List {
+            Section {
+                HStack {
+                    TextField("New note", text: $draft).textFieldStyle(.roundedBorder)
+                    Button("Add") {
+                        context.insert(Note(body: draft)); draft = ""
+                    }.disabled(draft.isEmpty)
+                }
+                Toggle("Pinned only", isOn: $pinnedOnly)
+            }
+            ForEach(visible) { note in
+                Button { note.pinned.toggle() } label: {
+                    Label(note.body, systemImage: note.pinned ? "pin.fill" : "pin")
+                }
+            }
+            .onDelete { for i in $0 { context.delete(visible[i]) } }
+        }
+    }
+}</code></pre>
+        <p><strong>Key decisions:</strong></p>
+        <ul>
+          <li><code>@Query(order: .reverse)</code> sorts in the store; no manual sort after fetch.</li>
+          <li>Toggling <code>note.pinned</code> mutates a live <code>@Model</code> — SwiftData tracks the change and autosaves; the <code>@Query</code> re-renders.</li>
+          <li>For a large notebook, replace the in-Swift <code>visible</code> filter with a <code>@Query</code> built from a <code>#Predicate { $0.pinned }</code> so the database does the filtering.</li>
+          <li>An in-memory container keeps the demo disposable and never touches the app's real store.</li>
+        </ul>
+      </details>
+
+      <!-- ============================== FURTHER READING ============================== -->
+      <h2>Further reading</h2>
+      <ul>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2023/10187/">WWDC23 — Meet SwiftData</a></li>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2023/10196/">WWDC23 — Model your schema with SwiftData</a></li>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2023/10195/">WWDC23 — Build an app with SwiftData</a></li>
+        <li><a href="https://developer.apple.com/documentation/swiftdata">Apple Docs — SwiftData</a></li>
+        <li><a href="https://developer.apple.com/documentation/swiftdata/preserving-your-apps-model-data-across-launches">Apple Docs — Migrations &amp; schema versions</a></li>
+      </ul>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script src="../assets/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+{
+  "name": "swiftuilab-guide",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local learning guide for the SwiftUILab Xcode project.",
+  "scripts": {
+    "dev": "npx --yes serve -l 5173 .",
+    "start": "npx --yes serve -l 5173 ."
+  }
+}

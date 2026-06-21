@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>01. SwiftUI State System — SwiftUILab</title>
+  <link rel="stylesheet" href="../assets/css/styles.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+</head>
+<body data-base="../" data-module="state-system">
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="brand" href="../index.html">SwiftUILab</a>
+      <nav id="sidebar-nav"></nav>
+    </aside>
+
+    <main class="content">
+      <p class="eyebrow">Module 01</p>
+      <h1>SwiftUI State System</h1>
+      <p class="lead">Ownership, value semantics, and the observation model that decides when a view's <code>body</code> re-runs.</p>
+
+      <!-- ============================== CONCEPT ============================== -->
+      <h2>Concept</h2>
+
+      <p>SwiftUI views are <strong>value types that are cheap and disposable</strong>. The struct you write is not the thing on screen — it's a description that SwiftUI re-evaluates whenever its inputs change. The entire "state system" exists to answer one question: <em>where does the source of truth live, and who gets invalidated when it changes?</em> Coming from UIKit, the mental flip is that you never hold a long-lived view object and mutate it; you mutate <em>state</em>, and the framework recomputes the view tree and diffs it.</p>
+
+      <h3>@State — owned, value-typed source of truth</h3>
+      <p><code>@State</code> gives a view its own private, persistent storage that survives <code>body</code> re-execution. The struct is recreated constantly; the <code>@State</code> storage is allocated <em>outside</em> the struct (in SwiftUI-managed memory) and reconnected on each recreation by structural identity. Mutating it invalidates the view. Use it for value types the view owns — never share the same <code>@State</code> across views by copying.</p>
+
+      <h3>@Binding — a reference into someone else's state</h3>
+      <p>A <code>Binding&lt;T&gt;</code> is a read/write projection — a get/set pair pointing at storage owned elsewhere. <code>$value</code> creates one from <code>@State</code>. The child neither owns nor copies the value; writing through the binding mutates the owner and invalidates it. This is value-semantics two-way data flow without UIKit's delegate/target-action plumbing.</p>
+
+      <div class="callout">
+        <strong>When bindings "break":</strong> if you write <code>let copy = value</code> in the child and mutate <code>copy</code>, you've left the binding — you're mutating a value-typed copy that goes nowhere. Always mutate through <code>$</code>/<code>_value.wrappedValue</code>. Likewise, a binding derived inside <code>body</code> with stale captured state can write back outdated values.
+      </div>
+
+      <h3>Custom <code>Binding(get:set:)</code></h3>
+      <p>When the stored representation and the presented representation differ — clamping, formatting, mapping optional↔non-optional, deriving from a collection — build a binding by hand. It's just a transform layer over storage:</p>
+      <pre><code class="language-swift">let clamped = Binding&lt;Double&gt;(
+    get: { Double(volume) },
+    set: { volume = min(10, max(0, Int($0.rounded()))) }
+)
+Slider(value: clamped, in: 0...10, step: 1)</code></pre>
+
+      <h3>@Observable vs ObservableObject — the iOS 17 shift</h3>
+      <p>The legacy model: a <code>class: ObservableObject</code> with <code>@Published</code> properties emits <code>objectWillChange</code> for the <em>whole object</em>. Any view observing it via <code>@ObservedObject</code>/<code>@StateObject</code> re-renders when <em>any</em> published property changes, even ones it doesn't read.</p>
+      <p>The <code>@Observable</code> macro (Observation framework) rewrites stored properties so access is tracked <strong>per-property at the point of read</strong>. A view that reads only <code>model.count</code> is invalidated only when <code>count</code> changes — not when <code>label</code> does. Under the hood the macro wraps each property with <code>access(keyPath:)</code> / <code>withMutation(keyPath:)</code> calls that register the current observation transaction. This is finer-grained and usually faster, and it removes the <code>@Published</code> boilerplate entirely.</p>
+
+      <table class="kv">
+        <tr><th></th><th>ObservableObject</th><th>@Observable</th></tr>
+        <tr><td>Granularity</td><td>Whole-object (objectWillChange)</td><td>Per-property, per-read</td></tr>
+        <tr><td>Property opt-in</td><td><code>@Published</code> each one</td><td>Automatic; opt <em>out</em> with <code>@ObservationIgnored</code></td></tr>
+        <tr><td>Own in a view via</td><td><code>@StateObject</code></td><td><code>@State</code></td></tr>
+        <tr><td>Observe (passed in)</td><td><code>@ObservedObject</code></td><td>plain property</td></tr>
+        <tr><td>Bindings</td><td><code>$object.prop</code> (wrapper)</td><td><code>@Bindable</code> → <code>$object.prop</code></td></tr>
+      </table>
+
+      <h3>@StateObject vs @ObservedObject — ownership (legacy, still vital)</h3>
+      <p><code>@StateObject</code> instantiates the object <strong>once</strong> and keeps it alive across the view's re-renders. <code>@ObservedObject</code> only <em>observes</em> an instance handed in from outside; it does <strong>not</strong> own its lifetime. The classic bug: declaring <code>@ObservedObject private var vm = ViewModel()</code> means a fresh <code>ViewModel</code> is constructed every time the parent re-renders, silently resetting its state. Rule: <em>the view that creates it uses <code>@StateObject</code> (or <code>@State</code> for <code>@Observable</code>); views that receive it use <code>@ObservedObject</code> (or a plain let).</em></p>
+
+      <h3>@Bindable — bindings into an @Observable you don't own</h3>
+      <p>Because an <code>@Observable</code> object is held as a plain property (no wrapper), there's no <code>$</code> projection by default. <code>@Bindable</code> supplies it: wrap a passed-in observable to get <code>$model.label</code> for a <code>TextField</code>. Use it in child views that edit a model they were given, and inline (<code>@Bindable var x = x</code>) when you need a binding from an environment object.</p>
+
+      <h3>@EnvironmentObject &amp; @Environment</h3>
+      <p>Both inject dependencies down the tree without prop-drilling. <code>@Environment</code> reads typed values (system ones like <code>\.colorScheme</code>, or custom keys); with <code>@Observable</code> you inject objects via <code>.environment(obj)</code> and read with <code>@Environment(Type.self)</code>. Define custom keys with the <code>@Entry</code> macro:</p>
+      <pre><code class="language-swift">extension EnvironmentValues {
+    @Entry var labAccentName: String = "System"
+}
+// inject:  .environment(\.labAccentName, "Indigo")
+// read:    @Environment(\.labAccentName) private var accentName</code></pre>
+
+      <h3>Performance: minimizing invalidations</h3>
+      <p>Every state change triggers a <code>body</code> recomputation for dependent views and a structural diff. Keep it cheap by: reading the narrowest state possible (<code>@Observable</code> helps automatically); splitting large views so a change touches a small subtree; conforming a view to <code>Equatable</code> + <code>.equatable()</code> so SwiftUI can skip identical re-renders; and using <code>Self._printChanges()</code> in <code>body</code> to see <em>what</em> triggered a redraw (<code>@self</code>, <code>@identity</code>, or a specific property).</p>
+
+      <!-- ============================== PITFALLS ============================== -->
+      <h2>Common pitfalls &amp; gotchas</h2>
+      <div class="callout pitfall">
+        <ul>
+          <li><strong><code>@ObservedObject var vm = VM()</code></strong> — creating an owned object in an observing wrapper. Resets on every parent re-render. Use <code>@StateObject</code>/<code>@State</code>.</li>
+          <li><strong>Mutating a copy, not the binding.</strong> <code>var local = binding.wrappedValue; local.x = …</code> writes nothing back.</li>
+          <li><strong>Deriving a custom <code>Binding</code> in <code>body</code> that captures stale state</strong> — the set closure can clobber newer values. Prefer reading current state inside the closures.</li>
+          <li><strong>Forgetting <code>@ObservationIgnored</code></strong> on stored deps inside an <code>@Observable</code> (e.g. a <code>UserDefaults</code> handle) — harmless but muddies tracking; required for <code>let</code>s you don't want observed.</li>
+          <li><strong>Putting <code>@State</code> on reference types you intend to share.</strong> <code>@State</code> is for view-owned sources of truth; shared services belong in the environment.</li>
+          <li><strong>Over-wide views.</strong> One giant <code>body</code> reading many properties re-renders wholesale. Decompose.</li>
+          <li><strong>Importing surprise:</strong> on Xcode 26 with <code>MEMBER_IMPORT_VISIBILITY</code>, <code>ObservableObject</code>/<code>@Published</code> need an explicit <code>import Combine</code> — SwiftUI no longer re-exports it.</li>
+        </ul>
+      </div>
+
+      <!-- ============================== REFERENCE ============================== -->
+      <h2>Reference implementation</h2>
+      <p>In the project: <code>Modules/01-StateSystem/Reference/</code>. The models:</p>
+      <pre><code class="language-swift">import SwiftUI
+import Observation
+import Combine // ObservableObject/@Published no longer re-exported by SwiftUI
+
+@Observable
+final class CounterModel {
+    var count = 0
+    var label = "Taps"
+    func increment() { count += 1 }
+    func reset() { count = 0 }
+}
+
+@Observable
+final class DemoSettings {
+    var username = ""
+    var notificationsEnabled = true
+}
+
+final class LegacyCounter: ObservableObject {
+    @Published var count = 0
+    func increment() { count += 1 }
+}
+
+extension EnvironmentValues {
+    @Entry var labAccentName: String = "System"
+}</code></pre>
+
+      <p>The screen wires five focused demos. Key pieces:</p>
+      <pre><code class="language-swift">// 1. @State owns; child mutates via @Binding
+private struct StateBindingDemo: View {
+    @State private var count = 0
+    var body: some View {
+        VStack(alignment: .leading) {
+            Text("Count: \(count)")
+            StepperRow(value: $count)   // $count : Binding&lt;Int&gt;
+        }
+    }
+}
+private struct StepperRow: View {
+    @Binding var value: Int            // observes, does not own
+    var body: some View {
+        HStack {
+            Button("–") { value -= 1 }
+            Button("+") { value += 1 }
+        }
+    }
+}
+
+// 3. @Observable owned via @State; child edits via @Bindable
+private struct ObservableBindableDemo: View {
+    @State private var model = CounterModel()
+    var body: some View {
+        VStack(alignment: .leading) {
+            Text("\(model.label): \(model.count)")
+            Button("Increment") { model.increment() }
+            LabelEditor(model: model)
+        }
+    }
+}
+private struct LabelEditor: View {
+    @Bindable var model: CounterModel   // unlocks $model.label
+    var body: some View {
+        TextField("Label", text: $model.label)
+    }
+}
+
+// 4. @StateObject OWNS the instance across re-renders
+private struct LegacyOwnershipDemo: View {
+    @StateObject private var counter = LegacyCounter()
+    @State private var tick = 0
+    var body: some View {
+        VStack {
+            Text("Counter: \(counter.count)")
+            Button("Increment") { counter.increment() }
+            Button("Re-render parent (tick \(tick))") { tick += 1 }
+            // Count survives because @StateObject owns it.
+            // Swap to @ObservedObject and it resets every tick.
+        }
+    }
+}</code></pre>
+      <p>The full file (including the clamping <code>Binding</code> demo and the custom-environment reader) is in the project; type it in and run it to watch each behavior live.</p>
+
+      <!-- ============================== CHALLENGE ============================== -->
+      <h2>Challenge</h2>
+      <p>Open <code>Modules/01-StateSystem/Challenge/StateSystemChallengeScreen.swift</code>. It compiles but every section is a <code>// TODO:</code>. Build an <strong>Account Settings panel</strong> that re-derives each concept yourself:</p>
+      <ol>
+        <li><strong>@State + @Binding</strong> — parent owns an <code>Int quantity</code>; a child stepper mutates it through a binding.</li>
+        <li><strong>Custom Binding</strong> — a <code>Binding&lt;String&gt;</code> that upper-cases on write, backed by <code>@State</code>.</li>
+        <li><strong>@Observable + @Bindable</strong> — an <code>@Observable Account</code> (owned via <code>@State</code>), with a child editing one property via <code>@Bindable</code>.</li>
+        <li><strong>@StateObject ownership</strong> — an <code>ObservableObject</code> whose state survives a forced parent re-render.</li>
+        <li><strong>Custom @Environment key</strong> — define one with <code>@Entry</code>, inject it at the screen root, read it in a leaf.</li>
+      </ol>
+      <p>Constraint: keep the file compiling at every step; the only hints are the TODO markers.</p>
+
+      <!-- ============================== SOLUTION ============================== -->
+      <h2>Solution reveal</h2>
+      <details class="reveal">
+        <summary>Show the solution &amp; commentary</summary>
+        <pre><code class="language-swift">// 2. Custom Binding that transforms on write
+struct UppercasingField: View {
+    @State private var raw = ""
+    var body: some View {
+        let upper = Binding&lt;String&gt;(
+            get: { raw },
+            set: { raw = $0.uppercased() }   // transform belongs in the binding
+        )
+        TextField("Code", text: upper)
+        Text("Stored: \(raw)")
+    }
+}
+
+// 3. @Observable + @Bindable
+@Observable final class Account { var displayName = "Ada" ; var isPublic = true }
+
+struct AccountEditor: View {
+    @State private var account = Account()           // owner uses @State
+    var body: some View {
+        Text(account.displayName)                    // tracked read
+        NameRow(account: account)                    // pass the instance
+    }
+}
+struct NameRow: View {
+    @Bindable var account: Account                   // projects $account.displayName
+    var body: some View { TextField("Name", text: $account.displayName) }
+}
+
+// 5. Custom environment key
+extension EnvironmentValues { @Entry var accountTheme: String = "Default" }
+// root:  .environment(\.accountTheme, "Midnight")
+// leaf:  @Environment(\.accountTheme) private var theme</code></pre>
+        <p><strong>Key decisions:</strong></p>
+        <ul>
+          <li>The owner of an <code>@Observable</code> uses <code>@State</code>; the editor uses <code>@Bindable</code> on a passed-in instance — never re-instantiate it downstream.</li>
+          <li>The transform lives in the <code>Binding</code>'s <code>set</code>, keeping the view body declarative and the storage authoritative.</li>
+          <li>For the legacy ownership task, the <em>only</em> change that matters is <code>@StateObject</code> vs <code>@ObservedObject</code>; the forced re-render (a <code>tick</code> <code>@State</code>) is what exposes the difference.</li>
+          <li>Custom environment keys are for ambient, rarely-changing config (theme, formatting), not for app state you mutate frequently — that belongs in an injected <code>@Observable</code>.</li>
+        </ul>
+      </details>
+
+      <!-- ============================== FURTHER READING ============================== -->
+      <h2>Further reading</h2>
+      <ul>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2023/10149/">WWDC23 — Discover Observation in SwiftUI</a></li>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2023/10160/">WWDC23 — Migrate from ObservableObject to @Observable</a> (the <code>Self._printChanges</code> + migration walkthrough)</li>
+        <li><a href="https://developer.apple.com/documentation/Observation">Apple Docs — Observation framework</a></li>
+        <li><a href="https://developer.apple.com/documentation/swiftui/managing-user-interface-state">Apple Docs — Managing user interface state</a></li>
+        <li><a href="https://developer.apple.com/documentation/swiftui/state"><code>@State</code></a> · <a href="https://developer.apple.com/documentation/swiftui/binding"><code>Binding</code></a> · <a href="https://developer.apple.com/documentation/swiftui/bindable"><code>@Bindable</code></a></li>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2021/10022/">WWDC21 — Demystify SwiftUI</a> (identity, lifetime, dependencies — the canonical mental model)</li>
+      </ul>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script src="../assets/js/app.js"></script>
+</body>
+</html>

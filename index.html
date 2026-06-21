@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SwiftUILab — Learning Guide</title>
+  <link rel="stylesheet" href="assets/css/styles.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+</head>
+<body data-base="" data-module="">
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="brand" href="index.html">SwiftUILab</a>
+      <nav id="sidebar-nav"></nav>
+    </aside>
+
+    <main class="content">
+      <p class="eyebrow">Personal learning guide</p>
+      <h1>SwiftUILab</h1>
+      <p class="lead">A senior iOS engineer's path from UIKit to fluent SwiftUI &amp; modern concurrency — one screen, one concept at a time.</p>
+
+      <div class="callout">
+        This site is the companion to the <code>SwiftUILab</code> Xcode project.
+        Read a module page, type the reference into Xcode, attempt the challenge in
+        <code>Challenge/</code>, then compare against the solution reveal. Check the
+        box in the sidebar to track progress (stored in <code>localStorage</code>).
+      </div>
+
+      <h2>How each module page is structured</h2>
+      <table class="kv">
+        <tr><th>Section</th><th>What it gives you</th></tr>
+        <tr><td>Concept</td><td>The why and the runtime/semantic behavior, with UIKit contrasts where they sharpen the point.</td></tr>
+        <tr><td>Pitfalls</td><td>The traps that bite senior engineers, not beginners.</td></tr>
+        <tr><td>Reference</td><td>The complete, correct code — also in the project under <code>Reference/</code>.</td></tr>
+        <tr><td>Challenge</td><td>A variation to implement from the <code>Challenge/</code> boilerplate (TODO markers only).</td></tr>
+        <tr><td>Solution reveal</td><td>The answer plus commentary on the key decisions.</td></tr>
+        <tr><td>Further reading</td><td>WWDC sessions, Apple docs, community deep-dives.</td></tr>
+      </table>
+
+      <h2>Project layout</h2>
+      <pre><code class="language-text">SwiftUILab/                 # Xcode app (the practice ground)
+  SwiftUILab/
+    App/                    # @main, RootView (TabView), composition root
+    Core/                   # Router, services (protocol + live/mock), ProgressStore
+    DesignSystem/           # tokens + reusable components
+    Models/                 # LearningModule, ModuleTopic, ScratchNote (SwiftData)
+    Modules/
+      01-StateSystem/
+        Reference/          # complete implementation
+        Challenge/          # boilerplate with // TODO: only
+  SwiftUILabTests/          # Swift Testing target
+guide/                      # this site</code></pre>
+
+      <h2>Status</h2>
+      <p><span class="pill">Built</span> Module 1 — State System. Modules 2–10 are scaffolded in the app (placeholder screens) and stubbed here; each fills in during its own session.</p>
+
+      <h2>Running things</h2>
+      <p><strong>The app:</strong> open <code>SwiftUILab/SwiftUILab.xcodeproj</code> in Xcode 26+ and run on an iOS 26 simulator.</p>
+      <p><strong>This site:</strong> open <code>guide/index.html</code> directly, or from the repo root run <code>npm run dev</code> (a tiny static server) and visit the printed URL.</p>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script src="assets/js/app.js"></script>
+</body>
+</html>
