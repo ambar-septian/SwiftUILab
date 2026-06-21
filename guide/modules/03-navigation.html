@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>03. Navigation — SwiftUILab</title>
+  <link rel="stylesheet" href="../assets/css/styles.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+</head>
+<body data-base="../" data-module="navigation">
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="brand" href="../index.html">SwiftUILab</a>
+      <nav id="sidebar-nav"></nav>
+    </aside>
+
+    <main class="content">
+      <p class="eyebrow">Module 03</p>
+      <h1>Navigation</h1>
+      <p class="lead">Type-safe, data-driven navigation with <code>NavigationStack</code> and <code>NavigationPath</code> — a single source of truth for the stack, programmatic deep links, the coordinator pattern, and enum-driven modals.</p>
+
+      <!-- ============================== CONCEPT ============================== -->
+      <h2>Concept</h2>
+
+      <h3>NavigationStack + NavigationPath</h3>
+      <p>The modern navigation model (iOS 16+) is <em>state-driven</em>: you bind a <code>NavigationStack</code> to an array (or a type-erased <code>NavigationPath</code>) that represents the pushed screens. Appending pushes; removing pops. The view is a pure function of that array — there is no imperative <code>pushViewController</code>. This is the inverse of UIKit's <code>UINavigationController</code>, where the stack is owned internally and you mutate it with method calls.</p>
+      <pre><code class="language-swift">@Observable final class ShopCoordinator {
+    var path: [ShopRoute] = []
+}
+
+NavigationStack(path: $coordinator.path) {
+    RootView()
+        .navigationDestination(for: ShopRoute.self) { route in
+            // exhaustive switch → every route resolves to a screen
+        }
+}</code></pre>
+      <p>Use a typed array (<code>[ShopRoute]</code>) when every destination is the same type — you get <code>Codable</code> state restoration and easy inspection. Use <code>NavigationPath</code> when the stack mixes heterogeneous value types.</p>
+
+      <h3>Type-safe routes</h3>
+      <p>Model every push destination as one <code>Hashable</code> enum. Pushing is <code>path.append(.product(p))</code> or a value-based <code>NavigationLink(value:)</code>; the <code>navigationDestination(for:)</code> switch maps each case to a screen. Because the enum is exhaustive, the compiler guarantees you can't forget a destination — the class of "dead link" bug that plagues string-based routing simply can't compile.</p>
+      <pre><code class="language-swift">enum ShopRoute: Hashable {
+    case category(String)
+    case product(Product)
+}
+
+NavigationLink(value: ShopRoute.category("Phones")) { Text("Phones") }</code></pre>
+
+      <h3>Programmatic deep linking</h3>
+      <p>Because the stack <em>is</em> data, a deep link is just an assignment. Building the whole array at once synthesizes the back-stack, so the system back button walks the hierarchy as if the user had tapped in manually.</p>
+      <pre><code class="language-swift">func deepLink(to product: Product) {
+    path = [.category(product.category), .product(product)]  // two screens deep
+}</code></pre>
+      <p>Keep the URL→routes mapping in a <strong>pure function</strong>, free of SwiftUI, so it's unit-testable in isolation:</p>
+      <pre><code class="language-swift">enum DeepLink {
+    static func routes(from url: URL) -> [ShopRoute] {
+        guard url.scheme == "swiftuilab", let host = url.host else { return [] }
+        // … map host + path components to routes
+    }
+}</code></pre>
+
+      <h3>The coordinator pattern</h3>
+      <p>Putting <code>path</code> (and any modal state) on one <code>@Observable</code> object placed in the environment lets <em>any</em> descendant drive navigation without threading bindings down through every initializer. Child screens read <code>@Environment(ShopCoordinator.self)</code> and call <code>coordinator.openProduct(p)</code>. This centralizes flow logic, keeps leaf views dumb, and makes the navigation testable as plain method calls on the coordinator.</p>
+
+      <h3>Sheet / fullScreenCover / popover state</h3>
+      <p>Modal presentation is also state-driven. Prefer <code>sheet(item:)</code> over <code>sheet(isPresented:)</code> when the modal needs data: bind an optional <code>Identifiable</code> enum — assigning presents, setting <code>nil</code> dismisses. One source of truth, no separate boolean to drift out of sync with "which thing is showing."</p>
+      <pre><code class="language-swift">enum ShopSheet: String, Identifiable { case cart, about; var id: String { rawValue } }
+
+.sheet(item: $coordinator.sheet) { sheet in SheetContent(sheet: sheet) }</code></pre>
+
+      <!-- ============================== PITFALLS ============================== -->
+      <h2>Common pitfalls &amp; gotchas</h2>
+      <div class="callout pitfall">
+        <ul>
+          <li><strong>NavigationView is deprecated.</strong> It had ambiguous column behavior and no programmatic stack. Use <code>NavigationStack</code> (single column) or <code>NavigationSplitView</code> (multi-column) instead.</li>
+          <li><strong>navigationDestination inside a lazy container.</strong> Attaching <code>.navigationDestination</code> inside a <code>List</code> row or <code>LazyVStack</code> that may not be rendered means the modifier isn't registered and the link silently does nothing. Attach it once, high in the stack's content.</li>
+          <li><strong>Multiple navigationDestination for the same type.</strong> Two registrations for the same value type in one stack is undefined — the last one wins unpredictably. Keep one switchboard per type.</li>
+          <li><strong>Non-Hashable route values.</strong> Everything you push must be <code>Hashable</code>; a stored associated value that isn't (e.g. a closure) won't compile or will break diffing.</li>
+          <li><strong>Boolean modal soup.</strong> A separate <code>@State var showCart</code>, <code>showAbout</code>, … invites "two sheets at once" bugs. Collapse them into one optional enum with <code>sheet(item:)</code>.</li>
+          <li><strong>Resetting the path mid-animation.</strong> Mutating <code>path</code> while a push/pop is animating can drop frames or desync. Drive it from one place (the coordinator) and avoid clobbering it from multiple callbacks.</li>
+        </ul>
+      </div>
+
+      <!-- ============================== REFERENCE ============================== -->
+      <h2>Reference implementation</h2>
+      <p>In the project: <code>Modules/03-Navigation/Reference/</code>. Key pieces:</p>
+      <pre><code class="language-swift">// Coordinator owns the stack + modal state, lives in the environment
+@Observable final class ShopCoordinator {
+    var path: [ShopRoute] = []
+    var sheet: ShopSheet?
+    func deepLink(to product: Product) { path = [.category(product.category), .product(product)] }
+    func popToRoot() { path.removeAll() }
+}
+
+// The stack: typed path + exhaustive destination switch + enum-driven sheet
+NavigationStack(path: $coordinator.path) {
+    List { /* category links, deep-link buttons, sheet buttons */ }
+        .navigationDestination(for: ShopRoute.self) { route in
+            switch route {
+            case .category(let name): CategoryScreen(category: name)
+            case .product(let p):     ProductScreen(product: p)
+            }
+        }
+        .sheet(item: $coordinator.sheet) { SheetContent(sheet: $0) }
+}
+.environment(coordinator)
+
+// A pushed screen drives further navigation via the environment — no bindings passed
+struct CategoryScreen: View {
+    @Environment(ShopCoordinator.self) private var coordinator
+    // NavigationLink(value: ShopRoute.product(p)) { … }
+}</code></pre>
+
+      <!-- ============================== CHALLENGE ============================== -->
+      <h2>Challenge</h2>
+      <p>Open <code>Modules/03-Navigation/Challenge/NavigationChallengeScreen.swift</code>. Build a <strong>type-safe Settings flow</strong>:</p>
+      <ol>
+        <li><strong>Route + sheet enums</strong> — model every push as <code>SettingsRoute: Hashable</code> and the modal as <code>SettingsSheet: Identifiable</code>.</li>
+        <li><strong>Coordinator</strong> — an <code>@Observable</code> object holding <code>path</code> and <code>sheet</code> with push / popToRoot / deepLink helpers.</li>
+        <li><strong>Stack wiring</strong> — bind <code>NavigationStack(path:)</code>, register one exhaustive <code>navigationDestination</code>, present with <code>sheet(item:)</code>.</li>
+        <li><strong>Deep link</strong> — a pure <code>SettingsDeepLink.routes(from:)</code> mapping <code>swiftuilab://settings/&lt;section&gt;</code> to the route stack.</li>
+      </ol>
+      <p>Constraint: keep the file compiling at every step.</p>
+
+      <!-- ============================== SOLUTION ============================== -->
+      <h2>Solution reveal</h2>
+      <details class="reveal">
+        <summary>Show the solution &amp; commentary</summary>
+        <pre><code class="language-swift">enum SettingsRoute: Hashable {
+    case section(String)
+    case detail(String)
+}
+
+enum SettingsSheet: String, Identifiable, CaseIterable {
+    case about
+    var id: String { rawValue }
+}
+
+@Observable final class SettingsCoordinator {
+    var path: [SettingsRoute] = []
+    var sheet: SettingsSheet?
+    func open(_ section: String) { path.append(.section(section)) }
+    func deepLink(to section: String) { path = [.section(section), .detail(section)] }
+    func popToRoot() { path.removeAll() }
+}
+
+enum SettingsDeepLink {
+    static func routes(from url: URL) -> [SettingsRoute] {
+        guard url.scheme == "swiftuilab", url.host == "settings" else { return [] }
+        guard let section = url.pathComponents.filter({ $0 != "/" }).first else { return [] }
+        return [.section(section), .detail(section)]
+    }
+}
+
+// View
+struct SettingsFlow: View {
+    @State private var coordinator = SettingsCoordinator()
+    var body: some View {
+        @Bindable var coordinator = coordinator
+        NavigationStack(path: $coordinator.path) {
+            List {
+                ForEach(["Account", "Notifications", "Privacy"], id: \.self) { s in
+                    NavigationLink(value: SettingsRoute.section(s)) { Text(s) }
+                }
+                Button("Deep link to Privacy") { coordinator.deepLink(to: "Privacy") }
+                Button("About") { coordinator.sheet = .about }
+            }
+            .navigationDestination(for: SettingsRoute.self) { route in
+                switch route {
+                case .section(let s): Text("\(s) settings")
+                case .detail(let s):  Text("\(s) detail")
+                }
+            }
+            .sheet(item: $coordinator.sheet) { _ in Text("About SwiftUILab") }
+        }
+        .environment(coordinator)
+    }
+}</code></pre>
+        <p><strong>Key decisions:</strong></p>
+        <ul>
+          <li>The route enum is the contract: the <code>navigationDestination</code> switch is exhaustive, so adding a case forces you to handle it.</li>
+          <li><code>deepLink</code> assigns the whole array so the synthesized back stack is correct — the user can pop back through <code>section</code> after a direct jump to <code>detail</code>.</li>
+          <li>The parser is pure and returns <code>[]</code> for anything it can't resolve, so a malformed URL is a no-op rather than a crash — and it's testable without a view.</li>
+          <li><code>@Bindable var coordinator</code> inside <code>body</code> is what unlocks <code>$coordinator.path</code> for the stack binding from an <code>@Observable</code> object.</li>
+        </ul>
+      </details>
+
+      <!-- ============================== FURTHER READING ============================== -->
+      <h2>Further reading</h2>
+      <ul>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2022/10054/">WWDC22 — The SwiftUI cookbook for navigation</a></li>
+        <li><a href="https://developer.apple.com/documentation/swiftui/navigationstack">Apple Docs — NavigationStack</a></li>
+        <li><a href="https://developer.apple.com/documentation/swiftui/navigationpath">Apple Docs — NavigationPath</a></li>
+        <li><a href="https://developer.apple.com/documentation/swiftui/view/navigationdestination(for:destination:)">Apple Docs — navigationDestination(for:)</a></li>
+        <li><a href="https://developer.apple.com/documentation/swiftui/view/sheet(item:ondismiss:content:)">Apple Docs — sheet(item:)</a></li>
+      </ul>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script src="../assets/js/app.js"></script>
+</body>
+</html>

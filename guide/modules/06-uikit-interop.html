@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>06. UIKit Interop — SwiftUILab</title>
+  <link rel="stylesheet" href="../assets/css/styles.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+</head>
+<body data-base="../" data-module="uikit-interop">
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="brand" href="../index.html">SwiftUILab</a>
+      <nav id="sidebar-nav"></nav>
+    </aside>
+
+    <main class="content">
+      <p class="eyebrow">Module 06</p>
+      <h1>UIKit Interop</h1>
+      <p class="lead">Bridging both directions: wrapping UIKit views and controllers for SwiftUI with <code>UIViewRepresentable</code> / <code>UIViewControllerRepresentable</code> and the Coordinator, avoiding update loops, hosting SwiftUI in UIKit with <code>UIHostingController</code>, and incremental migration.</p>
+
+      <!-- ============================== CONCEPT ============================== -->
+      <h2>Concept</h2>
+
+      <h3>UIViewRepresentable + Coordinator</h3>
+      <p>A <code>UIViewRepresentable</code> adapts a single UIKit view into the SwiftUI tree via three methods: <code>makeUIView</code> (create it once), <code>updateUIView</code> (push the latest SwiftUI state in, on every render), and <code>makeCoordinator</code> (create the bridge object). The <strong>Coordinator</strong> is an <code>NSObject</code> that owns the imperative glue: it holds the SwiftUI <code>@Binding</code> and serves as the target for target-action, or the delegate for UIKit callbacks, translating UIKit events back into SwiftUI state.</p>
+      <pre><code class="language-swift">struct RatingSlider: UIViewRepresentable {
+    @Binding var value: Double
+
+    func makeCoordinator() -&gt; Coordinator { Coordinator(value: $value) }
+
+    func makeUIView(context: Context) -&gt; UISlider {
+        let slider = UISlider()
+        slider.addTarget(context.coordinator,
+                         action: #selector(Coordinator.valueChanged(_:)),
+                         for: .valueChanged)
+        return slider
+    }
+
+    func updateUIView(_ uiView: UISlider, context: Context) { /* push value in */ }
+
+    final class Coordinator: NSObject {
+        let value: Binding&lt;Double&gt;
+        init(value: Binding&lt;Double&gt;) { self.value = value }
+        @objc func valueChanged(_ sender: UISlider) { value.wrappedValue = Double(sender.value) }
+    }
+}</code></pre>
+
+      <h3>Avoiding infinite update loops</h3>
+      <p>The danger zone is the two-way path. <code>updateUIView</code> runs on every SwiftUI render and pushes state into the UIKit view; the UIKit view's callback pushes back into SwiftUI state, which triggers another render, which calls <code>updateUIView</code> again. If you write the UIKit value unconditionally — especially mid-gesture — you can fight the user or oscillate. The fix is to <strong>guard the write</strong>: only apply the incoming value when it actually differs from the view's current value.</p>
+      <pre><code class="language-swift">func updateUIView(_ uiView: UISlider, context: Context) {
+    guard abs(Double(uiView.value) - value) &gt; 0.0001 else { return }  // loop breaker
+    uiView.setValue(Float(value), animated: false)
+}</code></pre>
+
+      <h3>UIViewControllerRepresentable lifecycle</h3>
+      <p>Same shape, one level up: <code>makeUIViewController</code> builds the controller; <code>updateUIViewController</code> pushes SwiftUI state in on each render. The controller's own lifecycle (<code>viewDidLoad</code>, <code>viewWillAppear</code>, …) runs normally. Use this for whole UIKit screens you can't yet rewrite — camera pickers, web views, complex custom controllers.</p>
+
+      <h3>UIHostingController sizing</h3>
+      <p>Going the other way, <code>UIHostingController</code> embeds a SwiftUI view inside UIKit. The classic bug is sizing: in a <code>UITableViewCell</code> or stack view, the host may report a zero/too-small height. Enable intrinsic sizing — set <code>hostingController.sizingOptions = [.intrinsicContentSize]</code> (iOS 16+) so Auto Layout reads SwiftUI's ideal size, or call <code>invalidateIntrinsicContentSize()</code> when content changes.</p>
+
+      <h3>Migration strategies</h3>
+      <p>Interop enables incremental adoption rather than a rewrite: host new SwiftUI screens inside an existing UIKit navigation flow with <code>UIHostingController</code>, and wrap legacy UIKit views you still need inside new SwiftUI screens with representables. Migrate leaf-first (small reusable views) before tackling whole flows.</p>
+
+      <!-- ============================== PITFALLS ============================== -->
+      <h2>Common pitfalls &amp; gotchas</h2>
+      <div class="callout pitfall">
+        <ul>
+          <li><strong>Unconditional writes in updateUIView.</strong> The infinite-loop / gesture-fighting bug. Guard the write so you only apply genuinely-changed values.</li>
+          <li><strong>State on the representable struct.</strong> The struct is recreated every render; put persistent state and references on the <em>Coordinator</em> (or in SwiftUI <code>@State</code>), never as stored vars on the representable.</li>
+          <li><strong>Retain cycles via the Coordinator.</strong> A Coordinator strongly held by the view while also holding a closure back to it can leak. Keep the binding (a value) and use <code>weak</code> for delegate back-references where needed.</li>
+          <li><strong>Heavy work in makeUIView.</strong> It runs once, but expensive setup there blocks the first render. Defer non-essential work.</li>
+          <li><strong>Zero-height UIHostingController.</strong> Forgetting <code>sizingOptions = [.intrinsicContentSize]</code> in cells yields collapsed content. Enable intrinsic sizing.</li>
+          <li><strong>Coordinator not used as the delegate target.</strong> Setting a delegate to <code>self</code> (the struct) instead of <code>context.coordinator</code> means callbacks never fire — the struct is gone by then.</li>
+        </ul>
+      </div>
+
+      <!-- ============================== REFERENCE ============================== -->
+      <h2>Reference implementation</h2>
+      <p>In the project: <code>Modules/06-UIKitInterop/Reference/</code>. Key pieces:</p>
+      <pre><code class="language-swift">// Pure, testable loop-breaker
+enum UpdateGuard {
+    static func shouldApply(incoming: Double, current: Double, epsilon: Double = 0.0001) -&gt; Bool {
+        abs(incoming - current) &gt; epsilon
+    }
+}
+
+// UISlider wrapped with a Coordinator + guarded updateUIView (RatingSlider)
+// UIViewController hosted via updateUIViewController (CounterControllerView)
+struct CounterControllerView: UIViewControllerRepresentable {
+    @Binding var count: Int
+    func makeUIViewController(context: Context) -&gt; CounterViewController { CounterViewController() }
+    func updateUIViewController(_ controller: CounterViewController, context: Context) {
+        controller.count = count
+    }
+}</code></pre>
+
+      <!-- ============================== CHALLENGE ============================== -->
+      <h2>Challenge</h2>
+      <p>Open <code>Modules/06-UIKitInterop/Challenge/InteropChallengeScreen.swift</code>:</p>
+      <ol>
+        <li><strong>Wrap UITextField</strong> — <code>WrappedTextField: UIViewRepresentable</code> with a <code>@Binding var text</code>; push edits back through a Coordinator (delegate or <code>.editingChanged</code>) and guard <code>updateUIView</code> so you don't overwrite while typing.</li>
+        <li><strong>Wrap a UIViewController</strong> — a <code>PageViewController</code> showing "Page N" and a <code>PageControllerView</code> that pushes a <code>@Binding var page</code> in.</li>
+      </ol>
+
+      <!-- ============================== SOLUTION ============================== -->
+      <h2>Solution reveal</h2>
+      <details class="reveal">
+        <summary>Show the solution &amp; commentary</summary>
+        <pre><code class="language-swift">struct WrappedTextField: UIViewRepresentable {
+    @Binding var text: String
+
+    func makeCoordinator() -&gt; Coordinator { Coordinator(text: $text) }
+
+    func makeUIView(context: Context) -&gt; UITextField {
+        let field = UITextField()
+        field.borderStyle = .roundedRect
+        field.addTarget(context.coordinator,
+                        action: #selector(Coordinator.editingChanged(_:)),
+                        for: .editingChanged)
+        return field
+    }
+
+    func updateUIView(_ uiView: UITextField, context: Context) {
+        if uiView.text != text { uiView.text = text }   // guard: don't clobber while typing
+    }
+
+    final class Coordinator: NSObject {
+        let text: Binding&lt;String&gt;
+        init(text: Binding&lt;String&gt;) { self.text = text }
+        @objc func editingChanged(_ sender: UITextField) { text.wrappedValue = sender.text ?? "" }
+    }
+}
+
+final class PageViewController: UIViewController {
+    var page = 0 { didSet { label.text = "Page \(page)" } }
+    private let label = UILabel()
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        label.text = "Page \(page)"; label.font = .boldSystemFont(ofSize: 28)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        ])
+    }
+}
+
+struct PageControllerView: UIViewControllerRepresentable {
+    @Binding var page: Int
+    func makeUIViewController(context: Context) -&gt; PageViewController { PageViewController() }
+    func updateUIViewController(_ vc: PageViewController, context: Context) { vc.page = page }
+}</code></pre>
+        <p><strong>Key decisions:</strong></p>
+        <ul>
+          <li>The <code>updateUIView</code> guard (<code>uiView.text != text</code>) is the whole game — without it, a re-render mid-edit resets the cursor or wipes input.</li>
+          <li>The Coordinator is the target, created once via <code>makeCoordinator</code>; the representable struct is transient and can't be a stable target.</li>
+          <li>The controller's <code>didSet</code> keeps its label in sync from one place, so <code>updateUIViewController</code> only needs to assign <code>page</code>.</li>
+        </ul>
+      </details>
+
+      <!-- ============================== FURTHER READING ============================== -->
+      <h2>Further reading</h2>
+      <ul>
+        <li><a href="https://developer.apple.com/documentation/swiftui/uiviewrepresentable">Apple Docs — UIViewRepresentable</a></li>
+        <li><a href="https://developer.apple.com/documentation/swiftui/uiviewcontrollerrepresentable">Apple Docs — UIViewControllerRepresentable</a></li>
+        <li><a href="https://developer.apple.com/documentation/swiftui/uihostingcontroller">Apple Docs — UIHostingController</a></li>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2020/10119/">WWDC20 — Use SwiftUI with UIKit</a></li>
+        <li><a href="https://developer.apple.com/documentation/swiftui/uihostingcontroller/sizingoptions-swift.struct">Apple Docs — UIHostingController.sizingOptions</a></li>
+      </ul>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script src="../assets/js/app.js"></script>
+</body>
+</html>

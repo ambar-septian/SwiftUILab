@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xcrun simctl *)",
+      "Bash(python3 -c \"import json,sys; devs=json.load\\(sys.stdin\\)['devices']; iphones=[d for k,v in devs.items\\(\\) for d in v if 'iPhone' in d.get\\('name',''\\) and d['isAvailable']]; print\\(iphones[0]['udid'] if iphones else 'none'\\)\")"
+    ]
+  }
+}

@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>05. Structured Concurrency &amp; Actors — SwiftUILab</title>
+  <link rel="stylesheet" href="../assets/css/styles.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+</head>
+<body data-base="../" data-module="concurrency">
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="brand" href="../index.html">SwiftUILab</a>
+      <nav id="sidebar-nav"></nav>
+    </aside>
+
+    <main class="content">
+      <p class="eyebrow">Module 05</p>
+      <h1>Structured Concurrency &amp; Actors</h1>
+      <p class="lead">Fanning work out with <code>TaskGroup</code> and <code>async let</code>, protecting mutable state with actors, understanding reentrancy and <code>@MainActor</code> isolation, custom global actors, <code>Sendable</code>, and what Swift 6 strict concurrency actually enforces.</p>
+
+      <!-- ============================== CONCEPT ============================== -->
+      <h2>Concept</h2>
+
+      <h3>TaskGroup vs async let</h3>
+      <p>Both run child tasks concurrently under <em>structured concurrency</em> — no child outlives the scope that created it, and cancelling the parent cancels every child. The difference is shape:</p>
+      <ul>
+        <li><strong><code>async let</code></strong> — a fixed, small number of parallel jobs known at compile time. Bind them, then <code>await</code> the results. Reads like ordinary code.</li>
+        <li><strong><code>TaskGroup</code></strong> — a dynamic collection of homogeneous jobs (a loop over a list). Add tasks, then reduce results as they complete (in nondeterministic order).</li>
+      </ul>
+      <pre><code class="language-swift">// async let — three concurrent loads, joined
+async let users = slowCount(42)
+async let revenue = slowCount(1000)
+async let errors = slowCount(3)
+return await DashboardSnapshot(users: users, revenue: revenue, errors: errors)
+
+// TaskGroup — N concurrent jobs, reduced
+await withTaskGroup(of: Int.self) { group in
+    for v in values { group.addTask { v * v } }
+    var total = 0
+    for await partial in group { total += partial }
+    return total
+}</code></pre>
+
+      <h3>Actors &amp; data-race safety</h3>
+      <p>An <code>actor</code> serializes access to its mutable state: concurrent callers queue, and only one runs inside the actor at a time. This replaces locks/serial queues around shared state — the compiler enforces that you can only touch an actor's mutable state through <code>await</code>, so data races on that state are impossible by construction.</p>
+
+      <h3>Actor reentrancy</h3>
+      <p>Actors are <strong>reentrant</strong>: when an actor method hits an <code>await</code> and suspends, the actor is free to process other messages before the first method resumes. So any invariant you checked <em>before</em> an <code>await</code> may be false <em>after</em> it. Always re-validate state across a suspension point inside an actor.</p>
+      <pre><code class="language-swift">func withdrawSlowly(_ amount: Int) async -&gt; Bool {
+    guard balance &gt;= amount else { return false }
+    await Task.yield()                      // other messages may run here
+    guard balance &gt;= amount else { return false }  // re-check — state may have changed
+    balance -= amount
+    return true
+}</code></pre>
+
+      <h3>@MainActor isolation</h3>
+      <p><code>@MainActor</code> is a global actor whose executor is the main thread. Anything annotated with it (or, in this project, anything left unannotated — the build sets <code>SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor</code>) runs on the main thread, so UI updates are safe by default. Crossing from a background context into <code>@MainActor</code> requires an <code>await</code>, which the compiler inserts and checks.</p>
+
+      <h3>Global actors</h3>
+      <p>You can declare your own global actor with <code>@globalActor</code> — a single shared serial executor that any number of types can opt into, the same way <code>@MainActor</code> works for the UI. Useful for serializing a subsystem (a database layer, an audit log) without passing one actor instance around.</p>
+      <pre><code class="language-swift">@globalActor actor DataActor { static let shared = DataActor() }
+
+@DataActor final class AuditLog { /* all access runs on DataActor's executor */ }</code></pre>
+
+      <h3>Sendable &amp; Swift 6 strict concurrency</h3>
+      <p><code>Sendable</code> marks a type safe to pass across isolation domains. Value types of <code>Sendable</code> members are automatically <code>Sendable</code>; reference types must be immutable, internally synchronized, or <code>@unchecked Sendable</code> (you promise correctness). Swift 6's strict concurrency turns <em>data-race risks into compile errors</em>: passing a non-<code>Sendable</code> mutable class between actors won't build. This project runs Swift 5 + approachable concurrency; treat this module as the place to write code that would also pass under Swift 6.</p>
+
+      <!-- ============================== PITFALLS ============================== -->
+      <h2>Common pitfalls &amp; gotchas</h2>
+      <div class="callout pitfall">
+        <ul>
+          <li><strong>Assuming actors are non-reentrant.</strong> The "check-then-act" you wrote before an <code>await</code> can be invalidated by an interleaved call. Re-check after every suspension.</li>
+          <li><strong>Actor hopping in a hot loop.</strong> Each <code>await someActor.x</code> is a potential suspension and context switch. Batch work into one actor method instead of many fine-grained <code>await</code>s.</li>
+          <li><strong>@unchecked Sendable as a silencer.</strong> It suppresses the compiler's check but not the underlying race. Only use it when you've actually made the type thread-safe (e.g. a lock inside).</li>
+          <li><strong>Blocking inside an actor.</strong> A synchronous blocking call (<code>sleep()</code>, a semaphore wait) holds the actor's executor and stalls every queued message. Use <code>await Task.sleep</code> and async APIs.</li>
+          <li><strong>Capturing main-actor state in a detached task.</strong> <code>Task.detached</code> drops the actor context; touching <code>@MainActor</code> state inside it requires an explicit hop and may race if you force it.</li>
+          <li><strong>Unstructured tasks for parallel work.</strong> Spawning loose <code>Task { }</code>s loses cancellation propagation and structured guarantees. Prefer <code>async let</code> / <code>TaskGroup</code>.</li>
+        </ul>
+      </div>
+
+      <!-- ============================== REFERENCE ============================== -->
+      <h2>Reference implementation</h2>
+      <p>In the project: <code>Modules/05-Concurrency/Reference/</code>. Key pieces:</p>
+      <pre><code class="language-swift">// Actor: race-free balance
+actor BankAccount {
+    private(set) var balance = 0
+    func deposit(_ n: Int) { balance += n }
+}
+
+// Hammer it from 1,000 concurrent tasks — always lands on 1000
+await withTaskGroup(of: Void.self) { group in
+    for _ in 0..&lt;1000 { group.addTask { await account.deposit(1) } }
+}
+
+// TaskGroup reduce + async let join (see parallelSum / loadDashboard)
+func parallelSum(_ values: [Int]) async -&gt; Int { /* squares each, sums */ }
+func loadDashboard() async -&gt; DashboardSnapshot { /* async let × 3 */ }
+
+// Global actor
+@globalActor actor DataActor { static let shared = DataActor() }
+@DataActor final class AuditLog { private(set) var entries: [String] = [] }</code></pre>
+
+      <!-- ============================== CHALLENGE ============================== -->
+      <h2>Challenge</h2>
+      <p>Open <code>Modules/05-Concurrency/Challenge/ConcurrencyChallengeScreen.swift</code>:</p>
+      <ol>
+        <li><strong>TaskGroup</strong> — <code>parallelMax(_:) async -&gt; Int?</code> computing the largest value concurrently.</li>
+        <li><strong>async let</strong> — <code>loadProfile() async -&gt; (name: String, posts: Int)</code> joining two concurrent loads.</li>
+        <li><strong>Actor</strong> — an <code>actor Counter</code> hammered with 500 concurrent increments that still totals 500.</li>
+      </ol>
+
+      <!-- ============================== SOLUTION ============================== -->
+      <h2>Solution reveal</h2>
+      <details class="reveal">
+        <summary>Show the solution &amp; commentary</summary>
+        <pre><code class="language-swift">// 1. TaskGroup max
+func parallelMax(_ values: [Int]) async -&gt; Int? {
+    await withTaskGroup(of: Int.self) { group in
+        for v in values { group.addTask { v } }
+        var best: Int? = nil
+        for await v in group { best = max(best ?? v, v) }
+        return best
+    }
+}
+
+// 2. async let join
+func loadProfile() async -&gt; (name: String, posts: Int) {
+    async let name = slowName()
+    async let posts = slowPosts()
+    return await (name, posts)
+}
+
+// 3. Actor counter
+actor Counter {
+    private(set) var value = 0
+    func increment() { value += 1 }
+}
+let counter = Counter()
+await withTaskGroup(of: Void.self) { group in
+    for _ in 0..&lt;500 { group.addTask { await counter.increment() } }
+}
+total = await counter.value   // exactly 500</code></pre>
+        <p><strong>Key decisions:</strong></p>
+        <ul>
+          <li>The group's reduction must be commutative/associative because children complete out of order — <code>max</code> and <code>+</code> qualify.</li>
+          <li><code>async let</code> wins for the profile because there are exactly two jobs; a <code>TaskGroup</code> would be ceremony.</li>
+          <li>The <code>Counter</code> needs no lock — the actor <em>is</em> the synchronization. The same loop over a plain <code>class</code> would lose increments to a data race (and won't even compile under Swift 6).</li>
+        </ul>
+      </details>
+
+      <!-- ============================== FURTHER READING ============================== -->
+      <h2>Further reading</h2>
+      <ul>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2021/10134/">WWDC21 — Explore structured concurrency in Swift</a></li>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2021/10133/">WWDC21 — Protect mutable state with Swift actors</a></li>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2022/110351/">WWDC22 — Eliminate data races using Swift Concurrency</a></li>
+        <li><a href="https://developer.apple.com/documentation/swift/actor">Apple Docs — actor</a></li>
+        <li><a href="https://developer.apple.com/documentation/swift/sendable">Apple Docs — Sendable</a></li>
+        <li><a href="https://www.swift.org/migration/documentation/migrationguide/">Swift 6 — Concurrency migration guide</a></li>
+      </ul>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script src="../assets/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>10. Performance &amp; Debugging — SwiftUILab</title>
+  <link rel="stylesheet" href="../assets/css/styles.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+</head>
+<body data-base="../" data-module="performance">
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="brand" href="../index.html">SwiftUILab</a>
+      <nav id="sidebar-nav"></nav>
+    </aside>
+
+    <main class="content">
+      <p class="eyebrow">Module 10</p>
+      <h1>Performance &amp; Debugging</h1>
+      <p class="lead">Finding and fixing the things that make a SwiftUI app feel slow: redraw debugging with <code>Self._printChanges()</code> and the SwiftUI Instruments template, scoping invalidations, hunting <code>Task</code> and closure leaks, detecting hitches and hangs, and trimming launch time.</p>
+
+      <!-- ============================== CONCEPT ============================== -->
+      <h2>Concept</h2>
+
+      <h3>The SwiftUI Instruments template</h3>
+      <p>The <strong>SwiftUI</strong> template in Instruments (with <em>View Body</em>, <em>View Properties</em>, and <em>Core Animation Commits</em> lanes) shows how often each view's <code>body</code> runs, why it re-ran (which dependency changed), and how long commits take. Start here before optimizing — measure which bodies are hot rather than guessing. Pair it with <strong>Time Profiler</strong> for CPU and <strong>Animation Hitches</strong> for dropped frames.</p>
+
+      <h3>Self._printChanges()</h3>
+      <p>A debugging call you drop at the top of a <code>body</code>: it logs, on every invocation, the dependency that forced the re-run (<code>@self</code> for identity changes, the property name for state changes). It's the fastest way to answer "why is this view re-rendering?" — but it's a private API, so remove it before shipping.</p>
+      <pre><code class="language-swift">var body: some View {
+    let _ = Self._printChanges()        // logs the trigger each render; debug only
+    return VStack { /* … */ }
+}</code></pre>
+
+      <h3>Scoping invalidations</h3>
+      <p>SwiftUI re-runs a <code>body</code> when a dependency it <em>read</em> changes. The lever is granularity: read state as low in the tree as possible. Extracting a frequently-changing piece into its own small subview means only that subview re-runs, not its parent and all siblings. With <code>@Observable</code>, observation is per-property — a view that reads only <code>settings.username</code> doesn't re-render when <code>settings.notificationsEnabled</code> changes (see Module 1's invalidation demo).</p>
+      <pre><code class="language-swift">// Bad: parent reads count, so the whole section re-renders on every tick
+Text("count = \(count)")
+
+// Better: isolate the volatile read in a leaf
+struct CounterLabel: View { let count: Int; var body: some View { Text("count = \(count)") } }</code></pre>
+
+      <h3>Task &amp; closure leaks</h3>
+      <p>The most common leak is a <strong>retain cycle</strong>: an object stores a closure that captures <code>self</code> strongly, so the object keeps itself alive forever. The fix is <code>[weak self]</code> at the capture site. The second is an <strong>unstructured <code>Task</code></strong> started from a view that outlives it — prefer <code>.task</code> (auto-cancelled) over <code>Task { }</code> (you must cancel). Verify with the <strong>Leaks</strong> and <strong>Allocations</strong> instruments, or in a unit test via a <code>weak</code> reference after dropping the strong one.</p>
+      <pre><code class="language-swift">final class RetainNode {
+    var onChange: (() -&gt; Void)?
+    func leakySetup() { onChange = { self.value += 1 } }              // ❌ self → onChange → self
+    func safeSetup()  { onChange = { [weak self] in self?.value += 1 } } // ✅ no cycle
+}</code></pre>
+
+      <h3>Hitches &amp; hang detection</h3>
+      <p>A <strong>hitch</strong> is a frame that misses its budget (~16.67ms at 60fps, ~8.3ms at 120fps), seen as a stutter. A <strong>hang</strong> is the main thread blocked long enough that the app stops responding. Causes: heavy work in <code>body</code> or on the main actor, synchronous I/O, oversized images. Detect hitches with the Animation Hitches instrument and Xcode's <em>Hangs</em> organizer; fix by moving work off the main actor and keeping <code>body</code> cheap and pure.</p>
+
+      <h3>Launch time</h3>
+      <p>Launch is split into pre-main (dynamic linking, static initializers) and post-main (your first frame). Keep work out of <code>init</code>/<code>App.init</code>, defer non-critical setup until after first paint, lazy-load heavy services, and avoid synchronous disk/network on the launch path. Measure with the <strong>App Launch</strong> instrument and the MetricKit/Xcode launch-time metrics.</p>
+
+      <!-- ============================== PITFALLS ============================== -->
+      <h2>Common pitfalls &amp; gotchas</h2>
+      <div class="callout pitfall">
+        <ul>
+          <li><strong>Expensive work in body.</strong> <code>body</code> can run many times per second; sorting, formatting, or decoding there tanks performance. Precompute and cache outside <code>body</code>.</li>
+          <li><strong>Over-wide observation.</strong> A view reading a whole model re-renders on any change. Read the narrowest slice, and split volatile reads into leaf subviews.</li>
+          <li><strong>AnyView in hot paths.</strong> Type erasure disables structural diffing, forcing full subtree replacement (see Module 2). Avoid it in lists and frequently-updated views.</li>
+          <li><strong>Strong self in stored closures.</strong> The retain-cycle leak. Use <code>[weak self]</code> and verify deallocation.</li>
+          <li><strong>Task { } instead of .task.</strong> Unstructured tasks from a view leak work past the view's lifetime. Prefer <code>.task</code> for auto-cancellation.</li>
+          <li><strong>Shipping _printChanges / debug logging.</strong> It's private API and noise in production. Strip it.</li>
+          <li><strong>Optimizing without measuring.</strong> Guessing wastes effort and can pessimize. Profile in Instruments first, then fix the proven hotspot.</li>
+        </ul>
+      </div>
+
+      <!-- ============================== REFERENCE ============================== -->
+      <h2>Reference implementation</h2>
+      <p>In the project: <code>Modules/10-Performance/Reference/</code>. Key pieces:</p>
+      <pre><code class="language-swift">// Pure, testable hitch detector — rolling average vs the frame budget
+struct FrameMonitor {
+    let budgetMs = 1000.0 / 60.0
+    private(set) var samples: [Double] = []
+    mutating func record(_ ms: Double) { samples.append(ms); /* trim to window */ }
+    var average: Double { samples.isEmpty ? 0 : samples.reduce(0, +) / Double(samples.count) }
+    var isHitchy: Bool { average &gt; budgetMs }
+}
+
+// Live retain-cycle demo: leaky vs safe, checked with a weak reference
+func run(safe: Bool) -&gt; String {
+    var node: RetainNode? = RetainNode()
+    weak var weakNode = node
+    if safe { node?.safeSetup() } else { node?.leakySetup() }
+    node = nil
+    return weakNode == nil ? "Deallocated ✅" : "Leaked ❌"
+}
+
+// Redraw debugging
+let _ = Self._printChanges()</code></pre>
+
+      <!-- ============================== CHALLENGE ============================== -->
+      <h2>Challenge</h2>
+      <p>Open <code>Modules/10-Performance/Challenge/PerformanceChallengeScreen.swift</code>:</p>
+      <ol>
+        <li><strong>_printChanges</strong> — add it to a view's <code>body</code> and read the console to see which button triggered the re-run.</li>
+        <li><strong>Scope a redraw</strong> — extract a counter label into its own subview so only it re-renders; prove it with a second <code>_printChanges</code>.</li>
+        <li><strong>Fix a retain cycle</strong> — add a <code>fixed()</code> method using <code>[weak self]</code> and verify the node deallocates via a <code>weak</code> reference.</li>
+      </ol>
+
+      <!-- ============================== SOLUTION ============================== -->
+      <h2>Solution reveal</h2>
+      <details class="reveal">
+        <summary>Show the solution &amp; commentary</summary>
+        <pre><code class="language-swift">// 1 + 2. Scope the redraw and observe it
+private struct CounterLabel: View {
+    let count: Int
+    var body: some View {
+        let _ = Self._printChanges()        // only logs when `count` actually changes
+        Text("count = \(count)").font(.title3.monospacedDigit())
+    }
+}
+
+struct Section: View {
+    @State private var count = 0
+    var body: some View {
+        let _ = Self._printChanges()        // parent: logs on its own state changes
+        return VStack {
+            CounterLabel(count: count)      // isolated leaf re-renders independently
+            Button("Increment") { count += 1 }
+        }
+    }
+}
+
+// 3. Fix the cycle
+final class BrokenTimer {
+    var tick: (() -&gt; Void)?
+    private(set) var ticks = 0
+    func fixed() { tick = { [weak self] in self?.ticks += 1 } }   // breaks the cycle
+}
+
+@Test func deallocates() {
+    var t: BrokenTimer? = BrokenTimer()
+    weak var weakT = t
+    t?.fixed()
+    t = nil
+    #expect(weakT == nil)               // safe setup → node is gone
+}</code></pre>
+        <p><strong>Key decisions:</strong></p>
+        <ul>
+          <li>Moving the volatile <code>count</code> read into <code>CounterLabel</code> means the parent's body doesn't depend on it — only the leaf re-runs.</li>
+          <li>Two <code>_printChanges</code> (parent + child) make the scoping <em>visible</em>: you see exactly which body fires on a tap.</li>
+          <li>The <code>weak</code>-reference test is a deterministic, Instruments-free way to assert no retain cycle — drop the strong reference and require the weak one to be <code>nil</code>.</li>
+        </ul>
+      </details>
+
+      <!-- ============================== FURTHER READING ============================== -->
+      <h2>Further reading</h2>
+      <ul>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2021/10022/">WWDC21 — Demystify SwiftUI</a> (identity, lifetime, dependencies)</li>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2023/10160/">WWDC23 — Analyze hangs with Instruments</a></li>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2022/10131/">WWDC22 — Eliminate animation hitches with Instruments</a></li>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2019/423/">WWDC19 — Optimizing App Launch</a></li>
+        <li><a href="https://developer.apple.com/documentation/xcode/improving-your-app-s-performance">Apple Docs — Improving your app's performance</a></li>
+      </ul>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script src="../assets/js/app.js"></script>
+</body>
+</html>

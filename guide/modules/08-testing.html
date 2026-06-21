@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>08. Unit Testing — SwiftUILab</title>
+  <link rel="stylesheet" href="../assets/css/styles.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+</head>
+<body data-base="../" data-module="testing">
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="brand" href="../index.html">SwiftUILab</a>
+      <nav id="sidebar-nav"></nav>
+    </aside>
+
+    <main class="content">
+      <p class="eyebrow">Module 08</p>
+      <h1>Unit Testing</h1>
+      <p class="lead">The Swift Testing framework end to end: <code>@Suite</code> / <code>@Test</code> / <code>#expect</code>, parameterized cases, testing async code, actors, <code>@Observable</code> models, error paths, and async sequences — with protocol-based test doubles instead of runtime mocking.</p>
+
+      <!-- ============================== CONCEPT ============================== -->
+      <h2>Concept</h2>
+
+      <h3>Swift Testing: @Test, #expect, traits</h3>
+      <p>Swift Testing (Xcode 16+) replaces XCTest's subclassing model with free functions and macros. A test is a function annotated <code>@Test</code>; group them in a <code>@Suite</code> struct (a fresh instance per test — natural isolation). Assert with <code>#expect(...)</code> (records a failure, keeps going) or <code>#require(...)</code> (throws to stop the test, and safely unwraps optionals). The expression is captured, so failures show the actual operand values — no <code>XCTAssertEqual</code> zoo.</p>
+      <pre><code class="language-swift">@Suite("Testing techniques")
+struct TestingTests {
+    @Test("PriceFormatter formats cents as USD")
+    func formatsCurrency() {
+        #expect(PriceFormatter().string(fromCents: 150) == "$1.50")
+    }
+}</code></pre>
+      <p>Traits configure tests: <code>.disabled("reason")</code>, <code>.tags(.network)</code>, <code>.timeLimit(.minutes(1))</code>, <code>.bug("FB123")</code>.</p>
+
+      <h3>Parameterized tests</h3>
+      <p>Pass <code>arguments:</code> to run the same body over many inputs — each case is reported independently, so you see exactly which input failed (vs a single loop that stops at the first failure).</p>
+      <pre><code class="language-swift">@Test("Formatter across inputs", arguments: [
+    (0, "$0.00"), (5, "$0.05"), (199, "$1.99"),
+])
+func formatsMany(cents: Int, expected: String) {
+    #expect(PriceFormatter().string(fromCents: cents) == expected)
+}</code></pre>
+
+      <h3>Testing async/await</h3>
+      <p>A test function can be <code>async</code> — just <code>await</code> the system under test directly. No expectations, no waiters, no timeouts to tune. The runner awaits the test.</p>
+      <pre><code class="language-swift">@Test func liveServiceFetches() async throws {
+    let articles = try await LiveArticleService().fetch()
+    #expect(articles.count == 5)
+}</code></pre>
+
+      <h3>Testing actors &amp; @MainActor</h3>
+      <p>Actor-isolated members are reached with <code>await</code> from an async test. To test main-actor code (most SwiftUI types here, given the project's default isolation), annotate the test <code>@MainActor</code> so it runs on the main actor and can touch that state synchronously.</p>
+      <pre><code class="language-swift">@Test func rateLimiterDenies() async {
+    let limiter = RateLimiter(capacity: 2)
+    #expect(await limiter.allow())
+    #expect(await limiter.allow())
+    #expect(await limiter.allow() == false)   // bucket empty
+}</code></pre>
+
+      <h3>Testing @Observable</h3>
+      <p>An <code>@Observable</code> model is just an object: construct it, drive it, assert on its properties. No publisher plumbing. Mark the test <code>@MainActor</code> if the model is main-actor isolated.</p>
+
+      <h3>Protocol-based test doubles</h3>
+      <p>Swift's preferred substitution is static, not runtime mocking: front a dependency with a <code>protocol</code>, inject a <code>Live</code> implementation in the app and a <code>Fake/Stub</code> in tests. The compiler verifies the double matches the contract, and there's no fragile method-swizzling. (See <code>CatalogService</code> / <code>MockCatalogService</code> in <code>Core/</code>.)</p>
+
+      <h3>Testing AsyncStream</h3>
+      <p>Drain the sequence with <code>for await</code> into an array, then assert on the collected values and their order.</p>
+      <pre><code class="language-swift">@Test func pulseStream() async {
+    var received: [Int] = []
+    for await n in Pulse.stream(count: 4) { received.append(n) }
+    #expect(received == [0, 1, 2, 3])
+}</code></pre>
+
+      <!-- ============================== PITFALLS ============================== -->
+      <h2>Common pitfalls &amp; gotchas</h2>
+      <div class="callout pitfall">
+        <ul>
+          <li><strong>Reaching for runtime mocks.</strong> Swift has no clean dynamic mocking. Inject protocol-fronted doubles instead of fighting the type system.</li>
+          <li><strong>Sleeping to "wait" for async work.</strong> With Swift Testing you <code>await</code> the result directly — a <code>Task.sleep</code> to let things settle is a flaky smell.</li>
+          <li><strong>Locale-dependent assertions.</strong> Currency/date formatting varies by locale; inject a fixed <code>Locale</code> (as <code>PriceFormatter</code> does) so assertions are deterministic on CI.</li>
+          <li><strong>Shared mutable state between tests.</strong> A <code>@Suite</code> gets a fresh instance per <code>@Test</code>, but global singletons and on-disk stores leak across tests. Use ephemeral <code>UserDefaults</code> / in-memory containers.</li>
+          <li><strong>Missing @MainActor on main-actor SUTs.</strong> Touching main-actor state from a non-isolated test won't compile (or forces awaits everywhere). Annotate the test.</li>
+          <li><strong>Asserting on whole objects when you mean one field.</strong> Prefer specific <code>#expect</code>s so a failure pinpoints the property, not "objects differ."</li>
+        </ul>
+      </div>
+
+      <!-- ============================== REFERENCE ============================== -->
+      <h2>Reference implementation</h2>
+      <p>In the project, the reference <em>is</em> the test file: <code>SwiftUILabTests/Modules/08-Testing/TestingTests.swift</code>, which demonstrates every technique against the SUTs in <code>Modules/08-Testing/Reference/TestingModels.swift</code> (<code>PriceFormatter</code>, <code>RateLimiter</code> actor, <code>Cart</code> observable, <code>Pulse</code> stream). The reference <em>screen</em> runs those SUTs live so you can eyeball expected values.</p>
+
+      <!-- ============================== CHALLENGE ============================== -->
+      <h2>Challenge</h2>
+      <p>Open <code>SwiftUILabTests/Modules/08-Testing/TestingChallengeTests.swift</code> and fill in the tests for <code>ShippingCalculator</code> and <code>Cart</code>:</p>
+      <ol>
+        <li><strong>Boundary</strong> — fee is flat below the free threshold, 0 at and above it.</li>
+        <li><strong>Parameterized</strong> — a single <code>@Test(arguments:)</code> covering several subtotals.</li>
+        <li><strong>@Observable</strong> — <code>Cart</code> add/remove/clear update <code>count</code> and <code>items</code>.</li>
+        <li><strong>Async/actor</strong> — <code>RateLimiter(capacity: 3)</code> allows exactly three times, then denies.</li>
+      </ol>
+
+      <!-- ============================== SOLUTION ============================== -->
+      <h2>Solution reveal</h2>
+      <details class="reveal">
+        <summary>Show the solution &amp; commentary</summary>
+        <pre><code class="language-swift">private let calc = ShippingCalculator(freeThresholdCents: 5000, flatFeeCents: 599)
+
+@Test func feeBelowThreshold() { #expect(calc.fee(forSubtotalCents: 4999) == 599) }
+
+@Test func feeAtThreshold() {
+    #expect(calc.fee(forSubtotalCents: 5000) == 0)   // boundary is inclusive
+    #expect(calc.fee(forSubtotalCents: 9999) == 0)
+}
+
+@Test("Fee across subtotals", arguments: [
+    (0, 599), (4999, 599), (5000, 0), (12000, 0),
+])
+func feeMany(subtotal: Int, expected: Int) {
+    #expect(calc.fee(forSubtotalCents: subtotal) == expected)
+}
+
+@MainActor @Test func cartCount() {
+    let cart = Cart()
+    cart.add("Apple"); cart.add("Pear")
+    #expect(cart.count == 2)
+    cart.remove("Apple")
+    #expect(cart.items == ["Pear"])
+    cart.clear()
+    #expect(cart.isEmpty)
+}
+
+@Test func limiterCapacity() async {
+    let limiter = RateLimiter(capacity: 3)
+    #expect(await limiter.allow())
+    #expect(await limiter.allow())
+    #expect(await limiter.allow())
+    #expect(await limiter.allow() == false)
+}</code></pre>
+        <p><strong>Key decisions:</strong></p>
+        <ul>
+          <li>The boundary test pins the <em>inclusive</em> behavior (free <em>at</em> 5000), the spot most off-by-one bugs hide.</li>
+          <li>The parameterized case reports each subtotal separately, so a regression names the exact input.</li>
+          <li>The <code>Cart</code> test is <code>@MainActor</code> because the model is main-actor isolated; the limiter test is <code>async</code> because the actor is reached with <code>await</code>.</li>
+        </ul>
+      </details>
+
+      <!-- ============================== FURTHER READING ============================== -->
+      <h2>Further reading</h2>
+      <ul>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2024/10179/">WWDC24 — Meet Swift Testing</a></li>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2024/10195/">WWDC24 — Go further with Swift Testing</a></li>
+        <li><a href="https://developer.apple.com/documentation/testing">Apple Docs — Swift Testing</a></li>
+        <li><a href="https://developer.apple.com/documentation/testing/parameterizedtesting">Apple Docs — Parameterized testing</a></li>
+        <li><a href="https://github.com/swiftlang/swift-testing">swift-testing on GitHub</a></li>
+      </ul>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script src="../assets/js/app.js"></script>
+</body>
+</html>

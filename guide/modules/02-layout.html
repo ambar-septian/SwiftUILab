@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>02. Layout & Rendering — SwiftUILab</title>
+  <link rel="stylesheet" href="../assets/css/styles.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+</head>
+<body data-base="../" data-module="layout">
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="brand" href="../index.html">SwiftUILab</a>
+      <nav id="sidebar-nav"></nav>
+    </aside>
+
+    <main class="content">
+      <p class="eyebrow">Module 02</p>
+      <h1>Layout &amp; Rendering</h1>
+      <p class="lead">How SwiftUI measures and places views — from the Layout protocol to PreferenceKey, alignment guides, view identity, and the @ViewBuilder / AnyView trade-off.</p>
+
+      <!-- ============================== CONCEPT ============================== -->
+      <h2>Concept</h2>
+
+      <h3>The Layout protocol vs GeometryReader</h3>
+      <p>SwiftUI's layout pass is a two-step negotiation: parent proposes a size, child reports what it needs, parent places it. The <strong>Layout protocol</strong> (iOS 16+) lets you write a custom container that participates in this negotiation cleanly — <code>sizeThatFits</code> answers "how big do you need to be?", <code>placeSubviews</code> positions each child within the allocated bounds.</p>
+      <p><code>GeometryReader</code> is a frequent misuse for layout tasks. It breaks the top-down flow: it reads its <em>proposed</em> size (not the natural size of its children), meaning you often need a two-pass layout — measure children, then re-render with a hard-coded size. It also leaks coordinate spaces into the view tree. Use <code>GeometryReader</code> for reading geometry <em>after</em> layout (e.g. positioning an overlay relative to a frame). Use the Layout protocol for <em>computing</em> layout.</p>
+
+      <pre><code class="language-swift">struct EqualWidthVStack: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        guard !subviews.isEmpty else { return .zero }
+        let w = subviews.map { $0.sizeThatFits(.unspecified).width }.max()!
+        let heights = subviews.map { $0.sizeThatFits(ProposedViewSize(width: w, height: nil)).height }
+        let totalH = heights.reduce(0, +) + spacing * CGFloat(subviews.count - 1)
+        return CGSize(width: proposal.width ?? w, height: totalH)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        let w = subviews.map { $0.sizeThatFits(.unspecified).width }.max()!
+        var y = bounds.minY
+        for subview in subviews {
+            let h = subview.sizeThatFits(ProposedViewSize(width: w, height: nil)).height
+            subview.place(
+                at: CGPoint(x: bounds.midX, y: y + h / 2),
+                anchor: .center,
+                proposal: ProposedViewSize(width: w, height: h)
+            )
+            y += h + spacing
+        }
+    }
+}</code></pre>
+
+      <h3>PreferenceKey — child-to-parent communication</h3>
+      <p>SwiftUI's layout data flows top-down (parent → child). <code>PreferenceKey</code> is the sanctioned bottom-up channel: a child writes a value via <code>.preference(key:value:)</code> (usually from inside a <code>GeometryReader</code> background), the framework reduces all values in the subtree using <code>reduce</code>, and the nearest ancestor that calls <code>.onPreferenceChange</code> receives the result.</p>
+      <p>The canonical use: making a column of labels all share the width of the widest one, without a shared <code>@State</code> binding. Each label reports its natural width; the parent reads the max and feeds it back as <code>frame(minWidth:)</code>.</p>
+      <pre><code class="language-swift">struct MaxWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+// In the child:
+Text(key)
+    .fixedSize()
+    .background(GeometryReader { geo in
+        Color.clear.preference(key: MaxWidthKey.self, value: geo.size.width)
+    })
+
+// In the parent:
+.onPreferenceChange(MaxWidthKey.self) { maxWidth = $0 }</code></pre>
+
+      <h3>alignmentGuide &amp; custom alignments</h3>
+      <p>Every built-in alignment guide (<code>.top</code>, <code>.center</code>, <code>.firstTextBaseline</code>, …) has a default value for each view. <code>.alignmentGuide</code> overrides that value for a single view — the closure receives the view's <code>ViewDimensions</code> and returns the new offset along the guide's axis.</p>
+      <p>Custom alignments let you define a new shared axis that multiple views can opt into. Define one with an <code>AlignmentID</code>, then use it in an <code>HStack(alignment:)</code> or <code>VStack(alignment:)</code>:</p>
+      <pre><code class="language-swift">extension VerticalAlignment {
+    private enum IconMidID: AlignmentID {
+        static func defaultValue(in context: ViewDimensions) -> CGFloat {
+            context[VerticalAlignment.center]  // fallback
+        }
+    }
+    static let iconMid = VerticalAlignment(IconMidID.self)
+}
+
+HStack(alignment: .iconMid) {
+    Image(systemName: "bell.badge.fill")
+        .alignmentGuide(.iconMid) { d in d[VerticalAlignment.center] }
+    VStack(alignment: .leading) {
+        Text("Title").font(.headline)
+        Text("Subtitle").font(.caption)
+            .alignmentGuide(.iconMid) { d in d[VerticalAlignment.center] }
+    }
+}</code></pre>
+
+      <h3>Structural vs explicit identity</h3>
+      <p>SwiftUI assigns every view an identity that governs whether it receives a fresh instance or has its state preserved. <strong>Structural identity</strong> is inferred from the view's position in the <code>body</code> tree — a view at the same position across renders is the same view, and its <code>@State</code> survives.</p>
+      <p><strong>Explicit identity</strong> is set with <code>.id(_:)</code>. When the value changes, SwiftUI treats the view as a different entity, destroys the old one, and inserts a fresh one — resetting all <code>@State</code>. This is useful for "reset this form" behavior.</p>
+      <div class="callout">
+        <strong>if/else ≠ same structural position.</strong> <code>if condition { ViewA() } else { ViewA() }</code> puts <code>ViewA</code> at two <em>different</em> structural positions (the true-branch and the false-branch). Toggling the condition does discard and recreate the view. If you need to preserve state across a condition, change a prop instead of branching: <code>ViewA(param: condition ? x : y)</code>.
+      </div>
+
+      <h3>@ViewBuilder &amp; AnyView trade-offs</h3>
+      <p><code>@ViewBuilder</code> is a result-builder that turns a block of conditional view expressions into a statically-typed composite. The exact type is visible to the SwiftUI differ at compile time, enabling structural diffing and animation between branches.</p>
+      <p><code>AnyView</code> type-erases its contents. SwiftUI sees an opaque box — it can't look inside to diff the subtrees, so it replaces the entire box on every change. Animations across <code>AnyView</code> boundaries don't interpolate; performance suffers in tight loops.</p>
+      <table class="kv">
+        <tr><th></th><th>@ViewBuilder</th><th>AnyView</th></tr>
+        <tr><td>Type visible to SwiftUI</td><td>Yes — exact composite type</td><td>No — opaque box</td></tr>
+        <tr><td>Structural diffing</td><td>Yes</td><td>No</td></tr>
+        <tr><td>Transitions across branches</td><td>Interpolated</td><td>Whole-box replace</td></tr>
+        <tr><td>When to use</td><td>All conditional view composition</td><td>Heterogeneous collections, unavoidable type erasure</td></tr>
+      </table>
+
+      <!-- ============================== PITFALLS ============================== -->
+      <h2>Common pitfalls &amp; gotchas</h2>
+      <div class="callout pitfall">
+        <ul>
+          <li><strong>GeometryReader for sibling sizing.</strong> GeometryReader reports the proposed size, not the natural size of its children. Reading sibling dimensions from it in layout code almost always needs a two-pass re-render. Use the Layout protocol instead.</li>
+          <li><strong>PreferenceKey feedback loops.</strong> If setting the collected preference value triggers a re-render that changes the reported value (e.g. <code>frame(width: collectedWidth)</code> changes the child's reported width), you get an oscillation. Report natural sizes (from a <code>fixedSize</code> or hidden overlay), not the constrained frame size.</li>
+          <li><strong>if/else creates two structural positions.</strong> Each branch is a distinct position — state doesn't survive the branch flip. Use prop-based variation (<code>View(flag: condition)</code>) to preserve state across condition changes.</li>
+          <li><strong>AnyView inside ForEach / List.</strong> List diffs its rows structurally. Wrapping rows in AnyView forces full replacement on every change instead of in-place animation.</li>
+          <li><strong>Animating across AnyView boundaries.</strong> A transition on an AnyView doesn't interpolate between the old and new content — it replaces the box. Unwrap to a @ViewBuilder function to get real interpolation.</li>
+          <li><strong>Layout sizeThatFits proposals.</strong> The system may call <code>sizeThatFits</code> with <code>.unspecified</code> (asking for the natural size), <code>.zero</code> (asking for the minimum), or a concrete size. Treat <code>proposal.width == nil</code> as "use natural width" and avoid crashing on edge cases.</li>
+        </ul>
+      </div>
+
+      <!-- ============================== REFERENCE ============================== -->
+      <h2>Reference implementation</h2>
+      <p>In the project: <code>Modules/02-Layout/Reference/</code>. Key pieces:</p>
+
+      <pre><code class="language-swift">// 1. Custom Layout — all children equal the widest child's width
+EqualWidthVStack(spacing: 8) {
+    Button("Short") {}
+    Button("Much longer label") {}
+    Button("OK") {}
+}
+.buttonStyle(.bordered)
+
+// 2. PreferenceKey — aligned key-value table
+struct PreferenceKeyDemo: View {
+    @State private var labelWidth: CGFloat = 0
+    var body: some View {
+        VStack {
+            ForEach(rows, id: \.0) { key, val in
+                KeyRow(key: key, value: val, minWidth: labelWidth)
+            }
+        }
+        .onPreferenceChange(MaxWidthKey.self) { labelWidth = $0 }
+    }
+}
+
+// 3. alignmentGuide — icon centered with first text line
+HStack(alignment: .firstTextBaseline) {
+    Image(systemName: "star.fill")
+        .alignmentGuide(.firstTextBaseline) { d in d[VerticalAlignment.center] }
+    VStack(alignment: .leading) {
+        Text("Title").font(.headline)
+        Text("Subtitle").font(.caption)
+    }
+}
+
+// 4. View identity — same structural position preserves @State
+CounterTile(label: labelVariant ? "Variant" : "Default")          // state preserved
+CounterTile(label: labelVariant ? "Variant" : "Default").id(labelVariant) // state resets
+
+// 5. @ViewBuilder — conditional icon, type preserved
+@ViewBuilder
+func statusIcon(active: Bool) -> some View {
+    if active { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
+    else       { Image(systemName: "circle").foregroundStyle(.secondary) }
+}</code></pre>
+
+      <!-- ============================== CHALLENGE ============================== -->
+      <h2>Challenge</h2>
+      <p>Open <code>Modules/02-Layout/Challenge/LayoutChallengeScreen.swift</code>. Build a <strong>Device Info panel</strong> that re-derives each concept:</p>
+      <ol>
+        <li><strong>Layout protocol</strong> — implement <code>EqualHeightHStack: Layout</code> that sizes every child to the tallest sibling's height.</li>
+        <li><strong>PreferenceKey</strong> — define <code>MaxHeightKey</code> and use it to sync all row heights to the tallest row.</li>
+        <li><strong>alignmentGuide</strong> — define a custom <code>HorizontalAlignment</code> called <code>.trailingLabel</code> and align the trailing edges of labels that may or may not have icon prefixes.</li>
+        <li><strong>Explicit identity</strong> — add <code>.id(entryKey)</code> to the <code>TextField</code> so tapping "New entry" resets it.</li>
+        <li><strong>@ViewBuilder</strong> — build a <code>SignalStrength(bars:)</code> view using <code>@ViewBuilder</code> that returns a different SF Symbol for 0–3 bars. No <code>AnyView</code>.</li>
+      </ol>
+      <p>Constraint: keep the file compiling at every step.</p>
+
+      <!-- ============================== SOLUTION ============================== -->
+      <h2>Solution reveal</h2>
+      <details class="reveal">
+        <summary>Show the solution &amp; commentary</summary>
+
+        <pre><code class="language-swift">// 1. EqualHeightHStack
+struct EqualHeightHStack: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard !subviews.isEmpty else { return .zero }
+        let maxH = subviews.map { $0.sizeThatFits(.unspecified).height }.max()!
+        let totalW = subviews.map { $0.sizeThatFits(ProposedViewSize(width: nil, height: maxH)).width }.reduce(0, +)
+                     + spacing * CGFloat(subviews.count - 1)
+        return CGSize(width: proposal.width ?? totalW, height: maxH)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let maxH = subviews.map { $0.sizeThatFits(.unspecified).height }.max()!
+        var x = bounds.minX
+        for subview in subviews {
+            let w = subview.sizeThatFits(ProposedViewSize(width: nil, height: maxH)).width
+            subview.place(
+                at: CGPoint(x: x + w / 2, y: bounds.midY),
+                anchor: .center,
+                proposal: ProposedViewSize(width: w, height: maxH)
+            )
+            x += w + spacing
+        }
+    }
+}
+
+// 2. MaxHeightKey
+struct MaxHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+// 3. Custom HorizontalAlignment
+extension HorizontalAlignment {
+    private enum TrailingLabelID: AlignmentID {
+        static func defaultValue(in context: ViewDimensions) -> CGFloat { context[HorizontalAlignment.trailing] }
+    }
+    static let trailingLabel = HorizontalAlignment(TrailingLabelID.self)
+}
+// Usage:
+VStack(alignment: .trailingLabel) {
+    HStack { Image(systemName: "wifi"); Text("Wi-Fi").alignmentGuide(.trailingLabel) { d in d[.trailing] } }
+    Text("Bluetooth").alignmentGuide(.trailingLabel) { d in d[.trailing] }
+}
+
+// 4. Explicit identity
+TextField("Type something…", text: $note)
+    .textFieldStyle(.roundedBorder)
+    .id(entryKey)   // ← this is the only change
+
+// 5. SignalStrength with @ViewBuilder
+struct SignalStrength: View {
+    let bars: Int
+    var body: some View {
+        icon.font(.title2).foregroundStyle(bars == 0 ? .secondary : .primary)
+    }
+
+    @ViewBuilder private var icon: some View {
+        switch bars {
+        case 0:  Image(systemName: "wifi.slash")
+        case 1:  Image(systemName: "wifi.exclamationmark")
+        case 2:  Image(systemName: "wifi")
+        default: Image(systemName: "wifi").symbolRenderingMode(.hierarchical)
+        }
+    }
+}</code></pre>
+
+        <p><strong>Key decisions:</strong></p>
+        <ul>
+          <li>In <code>EqualHeightHStack</code>, compute <code>maxH</code> from <code>.unspecified</code> proposals (natural size), then re-query each child's width <em>at</em> that height — some views (e.g. text) change width when height changes.</li>
+          <li>The <code>.trailingLabel</code> alignment works because <code>AlignmentID.defaultValue</code> fires for any view that doesn't explicitly opt in — you only need to call <code>.alignmentGuide</code> on the ones that differ from the default.</li>
+          <li><code>.id(entryKey)</code> on the <code>TextField</code> is the entire fix — the <code>$note</code> binding's value is irrelevant once the field is replaced with a new instance.</li>
+          <li><code>@ViewBuilder private var icon</code> keeps the type visible and the switch exhaustive. A <code>switch</code> inside <code>@ViewBuilder</code> is fully supported and the cleanest pattern for finite enumerations of views.</li>
+        </ul>
+      </details>
+
+      <!-- ============================== FURTHER READING ============================== -->
+      <h2>Further reading</h2>
+      <ul>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2022/10056/">WWDC22 — Compose custom layouts with SwiftUI</a> (Layout protocol deep-dive)</li>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2021/10022/">WWDC21 — Demystify SwiftUI</a> (identity, lifetime, dependencies)</li>
+        <li><a href="https://developer.apple.com/videos/play/wwdc2022/10055/">WWDC22 — The SwiftUI cookbook for navigation</a> (alignment guides section)</li>
+        <li><a href="https://developer.apple.com/documentation/swiftui/layout">Apple Docs — Layout</a></li>
+        <li><a href="https://developer.apple.com/documentation/swiftui/preferencekey">Apple Docs — PreferenceKey</a></li>
+        <li><a href="https://developer.apple.com/documentation/swiftui/view/alignmentguide(_:computevalue:)-9mdoh">Apple Docs — alignmentGuide</a></li>
+        <li><a href="https://developer.apple.com/documentation/swiftui/anyview">Apple Docs — AnyView</a> (and the performance note)</li>
+      </ul>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script src="../assets/js/app.js"></script>
+</body>
+</html>

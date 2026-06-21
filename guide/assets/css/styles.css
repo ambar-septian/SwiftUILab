@@ -1,0 +1,173 @@
+:root {
+  --bg: #0f1115;
+  --surface: #171a21;
+  --surface-2: #1f232c;
+  --border: #2a2f3a;
+  --text: #e6e8ec;
+  --muted: #9aa3b2;
+  --accent: #7c8cff;
+  --accent-soft: rgba(124, 140, 255, 0.15);
+  --green: #4ade80;
+  --sidebar-w: 300px;
+  --content-max: 820px;
+  font-size: 16px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.6;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.layout { display: flex; min-height: 100vh; }
+
+/* Sidebar */
+.sidebar {
+  width: var(--sidebar-w);
+  flex: 0 0 var(--sidebar-w);
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: 24px 16px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+.sidebar .brand {
+  font-weight: 700;
+  font-size: 1.1rem;
+  padding: 0 8px 16px;
+  display: block;
+  color: var(--text);
+}
+.progress-summary {
+  font-size: 0.8rem;
+  color: var(--muted);
+  padding: 4px 8px 12px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+.nav-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 0.92rem;
+}
+.nav-row:hover { background: var(--surface-2); }
+.nav-row.active { background: var(--accent-soft); }
+.nav-row.active a { color: var(--accent); font-weight: 600; }
+.nav-row a { color: var(--text); flex: 1; }
+.nav-row.done a { color: var(--muted); }
+.nav-row .num {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-right: 2px;
+}
+.nav-row input[type="checkbox"] { accent-color: var(--green); cursor: pointer; }
+
+/* Content */
+.content {
+  flex: 1;
+  padding: 48px 56px 120px;
+  max-width: calc(var(--content-max) + 112px);
+  margin: 0 auto;
+}
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.75rem;
+  color: var(--accent);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+h1 { font-size: 2.1rem; margin: 0 0 8px; line-height: 1.2; }
+h2 {
+  font-size: 1.4rem;
+  margin: 40px 0 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+h3 { font-size: 1.1rem; margin: 24px 0 8px; }
+p, li { color: var(--text); }
+.lead { font-size: 1.1rem; color: var(--muted); margin-bottom: 8px; }
+
+code:not(pre code) {
+  background: var(--surface-2);
+  padding: 2px 6px;
+  border-radius: 5px;
+  font-size: 0.88em;
+  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+}
+pre {
+  background: #0b0d12 !important;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px !important;
+  overflow-x: auto;
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+pre code { font-family: "SF Mono", ui-monospace, Menlo, monospace; }
+
+.callout {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  padding: 14px 18px;
+  margin: 16px 0;
+}
+.callout.warn { border-left-color: #fbbf24; }
+.callout.pitfall { border-left-color: #f87171; }
+
+.concept-list { columns: 2; gap: 24px; }
+@media (max-width: 720px) { .concept-list { columns: 1; } }
+
+details.reveal {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 16px;
+  margin: 16px 0;
+  background: var(--surface);
+}
+details.reveal summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--accent);
+  padding: 6px 0;
+}
+
+table.kv { border-collapse: collapse; width: 100%; margin: 12px 0; }
+table.kv th, table.kv td {
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+table.kv th { background: var(--surface-2); }
+
+.pill {
+  display: inline-block;
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+@media (max-width: 900px) {
+  .layout { flex-direction: column; }
+  .sidebar { width: 100%; height: auto; position: static; }
+  .content { padding: 32px 20px 80px; }
+}

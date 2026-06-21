@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xcodebuild -version)",
+      "Bash(xcodebuild -list -project SwiftUILab.xcodeproj)",
+      "Bash(xcrun simctl *)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(xcodebuild -scheme SwiftUILab -destination 'platform=iOS Simulator,name=iPhone 17' build)"
+    ]
+  }
+}
