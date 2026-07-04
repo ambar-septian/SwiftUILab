@@ -5,7 +5,8 @@
       "Bash(xcodebuild -list -project SwiftUILab.xcodeproj)",
       "Bash(xcrun simctl *)",
       "mcp__Claude_Preview__preview_start",
-      "Bash(xcodebuild -scheme SwiftUILab -destination 'platform=iOS Simulator,name=iPhone 17' build)"
+      "Bash(xcodebuild -scheme SwiftUILab -destination 'platform=iOS Simulator,name=iPhone 17' build)",
+      "Bash(git -C /Users/ambar/Developer/POC grep -rniE '\\([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\\\.[a-zA-Z]{2,}\\)' -- ':\\(exclude\\)*.xcuserstate' ':\\(exclude\\)*.md')"
     ]
   }
 }
